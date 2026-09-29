@@ -36,6 +36,7 @@ class ProviderBase(BaseModel):
     daily_limit: int | None = Field(default=None, ge=1)
     per_second_limit: int | None = Field(default=None, ge=1, le=100_000)
     max_connections: int | None = Field(default=None, ge=1, le=500)
+    reports_delivery: bool = False
 
 
 class ProviderCreate(ProviderBase):
@@ -55,6 +56,26 @@ class ProviderUpdate(BaseModel):
     daily_limit: int | None = Field(default=None, ge=1)
     per_second_limit: int | None = Field(default=None, ge=1, le=100_000)
     max_connections: int | None = Field(default=None, ge=1, le=500)
+    reports_delivery: bool | None = None
+
+
+class BounceMailboxIn(BaseModel):
+    host: str = Field(min_length=1, max_length=255, pattern=r"^[A-Za-z0-9.-]+$")
+    port: int = Field(default=993, ge=1, le=65535)
+    ssl: bool = True
+    username: str = Field(min_length=1, max_length=255)
+    password: str | None = Field(default=None, max_length=1024, description="Omit to keep the stored password")
+    folder: str = Field(default="INBOX", min_length=1, max_length=255)
+    delete_processed: bool = False
+
+
+class BounceMailboxOut(BaseModel):
+    host: str
+    port: int
+    ssl: bool
+    username: str
+    folder: str
+    delete_processed: bool
 
 
 class ProviderSecretIn(BaseModel):
@@ -75,11 +96,16 @@ class ProviderOut(ORM):
     daily_limit: int | None
     per_second_limit: int | None
     max_connections: int | None = None
+    reports_delivery: bool = False
     status: ProviderStatus
     status_reason: str | None
     health_score: float
     has_secret: bool = False
     webhook_enabled: bool = False
+    bounce_mailbox: BounceMailboxOut | None = None
+    bounce_last_polled_at: datetime | None = None
+    bounce_last_error: str | None = None
+    bounce_processed_total: int = 0
     last_tested_at: datetime | None
     last_test_ok: bool | None
     last_test_message: str | None

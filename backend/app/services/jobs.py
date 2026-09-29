@@ -316,8 +316,8 @@ async def record_results(
     job = await _owned_job(db, worker, job_id, attempt_id)
     provider = await db.get(Provider, job.provider_id)
     assert provider is not None
-    # Providers without a delivery webhook cannot confirm delivery: SMTP acceptance counts as delivered.
-    accept_is_delivery = provider.webhook_secret_encrypted is None
+    # Providers that do not send delivery confirmations: SMTP acceptance counts as delivered.
+    accept_is_delivery = not provider.reports_delivery
 
     groups: dict[str, list[dict[str, Any]]] = {"sent": [], "deferred": [], "bounced": [], "failed": [], "invalid": []}
     for r in results:

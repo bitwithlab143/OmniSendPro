@@ -27,7 +27,7 @@ class TestResult:
     latency_ms: int | None = None
 
 
-async def _blocked_host(host: str) -> str | None:
+async def blocked_host(host: str) -> str | None:
     """Refuse link-local / metadata targets (SSRF guard for an admin-supplied host)."""
     try:
         infos = await asyncio.get_running_loop().getaddrinfo(host, None, type=socket.SOCK_STREAM)
@@ -41,7 +41,7 @@ async def _blocked_host(host: str) -> str | None:
 
 
 async def test_connection(provider: Provider) -> TestResult:
-    blocked = await _blocked_host(provider.host)
+    blocked = await blocked_host(provider.host)
     if blocked:
         return TestResult(False, blocked)
     password = decrypt_secret(provider.credential.encrypted_secret) if provider.credential else None

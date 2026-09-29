@@ -45,7 +45,7 @@ Phases follow `ARCHITECTURE.md §62 Development Phases`, plus a Phase 0 for setu
 |---|---|---|---|
 | **Phase 0**: Foundation & Planning | Understand architecture, resolve gaps, scaffold monorepo, dev environment | ✅ | 12 / 12 |
 | **Phase 1**: MVP | Admin/User login, campaigns, provider management, basic queue, single worker, basic sending & reports | ✅ | 22 / 22 |
-| **Phase 2**: Reliability & Compliance | Batch processing, retries, worker monitoring, provider health, suppression, audit logs | 🔄 | 14 / 15 |
+| **Phase 2**: Reliability & Compliance | Batch processing, retries, worker monitoring, provider health, suppression, audit logs | 🔄 | 14 / 15 (P2-15 in progress) |
 | **Phase 3**: Scale & Real-time | Multiple workers, horizontal scaling, real-time dashboard, advanced reports, object storage, event processing | 🔄 | 6 / 15 |
 | **Phase 4**: Production Hardening | HA, DB replication, queue HA, autoscaling, observability, disaster recovery | 🔄 | 0 / 10 (4 partial) |
 
@@ -108,12 +108,12 @@ Phases follow `ARCHITECTURE.md §62 Development Phases`, plus a Phase 0 for setu
 | P2-07 | Provider state machine ACTIVE/WARNING/DEGRADED/DISABLED + admin alerting | DS-06 | ✅ | 2026-09-29 | Alerting = dashboard, audit log and Prometheus rules; push notifications tracked in P4-05 |
 | P2-08 | Suppression list + pre-send suppression check | DS-07 | ✅ | 2026-09-29 | Checked at batch build and again at claim |
 | P2-09 | Unsubscribe endpoint + `List-Unsubscribe` / one-click headers | DS-07 | ✅ | 2026-09-29 | RFC 8058 |
-| P2-10 | Bounce & complaint ingestion (provider webhooks / DSN) → auto-suppression | DS-07, DS-05 | 🔄 | 2026-09-29 | Signed webhooks and SMTP-time hard bounces done. **Remaining:** DSN/bounce-mailbox parsing and FBL (ARF) for plain-SMTP providers |
+| P2-10 | Bounce & complaint ingestion (provider webhooks / DSN) → auto-suppression | DS-07, DS-05, DS-16 | ✅ | 2026-09-29 | Signed webhooks, SMTP-time hard bounces, and asynchronous DSN (RFC 3464) + ARF (RFC 5965) reports via an IMAP bounce mailbox polled by the scheduler or the signed raw-message endpoint (`forward-bounce.sh` for MTA pipes). Explicit per-provider *reports delivery* flag |
 | P2-11 | Audit logging of all sensitive admin actions | DS-11 | ✅ | 2026-09-29 | |
 | P2-12 | User quota enforcement (daily/hourly) | DS-05 | ✅ | 2026-09-29 | Atomic reserve/refund in Redis |
 | P2-13 | Campaign pause / resume / cancel | DS-04 | ✅ | 2026-09-29 | |
 | P2-14 | Sender authentication checks (SPF/DKIM/DMARC) surfaced in provider setup | DS-06 | ✅ | 2026-09-29 | |
-| P2-15 | Admin "System → API Keys" (§6) for programmatic access | DS-09, DS-10 | ⬜ | | Found during implementation: in the admin menu spec but not yet designed |
+| P2-15 | Admin "System → API Keys" (§6) for programmatic access | DS-17, ADR-012 | 🔄 | | Design done (DS-17); implementation in progress |
 
 ## Phase 3: Scale & Real-time
 
@@ -180,7 +180,7 @@ Tick when verified by a test, drill, or measurement (link the evidence).
 
 | Suite | Result |
 |---|---|
-| Backend (`backend/tests`, real Postgres + Redis) | ✅ 54 passed |
+| Backend (`backend/tests`, real Postgres + Redis) | ✅ 71 passed |
 | Worker (`worker/tests`) | ✅ 29 passed |
 | Load test (`tests/load`) | ✅ 60k recipients: 2,307 / 3,734 / 4,803 msgs/s with 1 / 2 / 3 workers |
 | End-to-end (`tests/e2e`: uvicorn + scheduler + worker process + SMTP sink) | ✅ 1 passed (120 deliveries) |
@@ -199,7 +199,7 @@ Tick when verified by a test, drill, or measurement (link the evidence).
 | R-04 | Throughput | 416.67/sec target depends on provider limits outside our control | Target may not be met | Platform measured at 4.8k msgs/s; real-world rate = provider limits × `max_connections` (docs/PERFORMANCE.md) | Mitigated |
 | R-05 | Repo hygiene | A local Redis snapshot (`dump.rdb`, test data only) was committed in `e0d9add` and removed in `79d4439` | Low: no secrets, but it stays in history | Now in `.gitignore`; rewrite history only if the owner wants it | Accepted |
 | R-06 | Operations | Scheduler runs inside API replicas (leader lock) | A slow tick shares CPU with API requests | Split into its own process (P3-02) | Open |
-| R-07 | Compliance | Plain-SMTP providers without webhooks only report bounces seen during SMTP; asynchronous bounces and complaints are missed | Bounce/complaint suppression incomplete for those providers | DSN/FBL ingestion (P2-10) | Open |
+| R-07 | Compliance | Plain-SMTP providers without webhooks only report bounces seen during SMTP; asynchronous bounces and complaints are missed | Bounce/complaint suppression incomplete for those providers | DSN/FBL ingestion (P2-10): bounce mailbox (IMAP) or signed raw-message endpoint per provider | Resolved |
 
 ---
 
@@ -215,6 +215,8 @@ Short record of decisions that changed scope or design. Full rationale lives in 
 | 2026-09-29 | Postgres `jobs` table is the queue (claim via `SKIP LOCKED`); Redis is used for limits, locks and live stats, not job storage | ADR-002, ADR-010 |
 | 2026-09-29 | Worker API returns the provider credential inside the claim payload (workers never touch the DB) | ADR-004, design §Implementation notes |
 | 2026-09-29 | Providers without a delivery webhook count SMTP acceptance as "delivered" | design §Implementation notes |
+| 2026-09-29 | Superseded: an explicit provider flag `reports_delivery` decides whether SMTP acceptance counts as delivered (a webhook secret can now exist just for raw bounce reports) | DS-16 |
+| 2026-09-29 | Asynchronous bounces: IMAP polling + signed raw endpoint; no inbound SMTP server | ADR-011 |
 | 2026-09-29 | Shared frontend package `packages/web-shared` introduced up front (duplication between the two apps would be large) | DS-01 |
 | 2026-09-29 | Unsubscribe links point at the User panel origin (`PUBLIC_BASE_URL`); https one-click only, no mailto | DS-07 |
 
@@ -223,6 +225,8 @@ Short record of decisions that changed scope or design. Full rationale lives in 
 ## Changelog
 
 Newest first. One line per completed task or significant change.
+
+- **2026-09-29**: Asynchronous bounces and complaints (DS-16): DSN/ARF parser, IMAP bounce mailbox per provider (scheduler-polled, test/poll/remove in the admin UI), signed raw-message endpoint and `forward-bounce.sh`, correlation by Message-ID or campaign + address restricted to the sending provider, SSRF guard and mandatory TLS for IMAP. 17 new tests. Resolves R-07. (P2-10)
 
 - **2026-09-29**: Performance pass. Load-test harness; compiled message rendering (~110× faster per message), SMTP connection reuse across jobs, uvloop, provider *Max connections*, scheduler wake-up on start. 396 → 2,307 msgs/s per worker; 4,803 msgs/s with 3 workers. Fixed two bugs found by load testing: CSV row split at the 64 KB sample boundary, and bootstrap race with several API processes. (P3-10 partial, P3-13, P3-14)
 - **2026-09-29**: Docker images, nginx (strict CSP, login rate limits, separate worker-API listener), compose stack, CI workflow, docs (`docs/*.md`, README, CONTRIBUTING). Production-mode compose verified with 300 deliveries. (P0-07, P0-08, P0-12, P4-04/05/08 partial)
@@ -236,10 +240,10 @@ Newest first. One line per completed task or significant change.
 
 ## Next up (recommended order)
 
-1. **P2-10**: bounce-mailbox DSN and ARF complaint parsing for SMTP-only providers (compliance gap R-07).
+1. **P2-15**: API keys (DS-17).
 2. **P3-15**: SMTP PIPELINING, then the large multi-machine load test (P3-10).
 3. **P3-12 / P3-11**: retention jobs, then partitioning for high-volume tables.
 4. **P3-03**: SSE live updates (replace polling on the monitor and dashboards).
 5. **P3-04 / P3-05**: object-storage uploads and an out-of-API validation worker for very large lists.
-6. **P2-15**: API keys; **P4-10**: Redis ACL for workers; **P3-02**: dedicated scheduler process.
+6. **P4-10**: Redis ACL for workers; **P3-02**: dedicated scheduler process.
 7. Phase 4: backups with a restore drill (P4-06), Redis failure drill (P4-07), monitoring deployment (P4-04/05).

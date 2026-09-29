@@ -37,6 +37,10 @@ DEFAULTS: dict[str, Any] = {
     "max_batch_size": 10000,
     "campaign_failure_threshold": 0.5,
     "require_from_domain_match": True,
+    # Bounce / feedback-loop mailboxes (DS-16)
+    "bounce_poll_interval_seconds": 60,
+    # API keys (DS-17)
+    "api_key_requests_per_minute": 600,
 }
 
 SETTING_DESCRIPTIONS: dict[str, str] = {
@@ -58,6 +62,8 @@ SETTING_DESCRIPTIONS: dict[str, str] = {
     "max_batch_size": "Hard upper bound for any batch",
     "campaign_failure_threshold": "Failure ratio above which a finished campaign is FAILED",
     "require_from_domain_match": "Campaign From domain must match the provider's From domain",
+    "bounce_poll_interval_seconds": "How often bounce/complaint mailboxes are read",
+    "api_key_requests_per_minute": "Request limit per API key",
 }
 
 _TTL = 15.0

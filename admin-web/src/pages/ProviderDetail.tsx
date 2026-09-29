@@ -1,6 +1,7 @@
 import {
   Badge,
   Button,
+  Checkbox,
   Card,
   CardBody,
   CardHeader,
@@ -32,12 +33,12 @@ import {
   type Page,
 } from "@omnisend/web-shared";
 import { useQuery } from "@tanstack/react-query";
-import { ArrowLeft, CheckCircle2, KeyRound, Pencil, Plug, Power, PowerOff, Trash2, Webhook, XCircle } from "lucide-react";
-import { useState } from "react";
+import { ArrowLeft, CheckCircle2, Inbox, KeyRound, Pencil, Plug, Power, PowerOff, RefreshCw, Trash2, Webhook, XCircle } from "lucide-react";
+import { useState, type ReactNode } from "react";
 import { Link, useParams } from "react-router";
 
 import { api } from "../api";
-import type { Assignment, Provider, User } from "../types";
+import type { Assignment, BounceMailbox, Provider, User } from "../types";
 import { ProviderFields, providerBody } from "./providerForm";
 
 interface HealthLog {
@@ -53,6 +54,22 @@ interface HealthLog {
   health_score: number;
   status: string;
   created_at: string;
+}
+
+interface WebhookSecret {
+  webhook_secret: string;
+  endpoint: string;
+  inbound_endpoint: string;
+  note: string;
+}
+
+interface PollResult {
+  fetched: number;
+  accepted: number;
+  duplicates: number;
+  unmatched: number;
+  unrecognised: number;
+  error: string | null;
 }
 
 interface DnsResult {
@@ -72,7 +89,7 @@ export function ProviderDetailPage() {
   const writable = can("providers.write");
   const [editing, setEditing] = useState(false);
   const [secretOpen, setSecretOpen] = useState(false);
-  const [webhook, setWebhook] = useState<{ webhook_secret: string; endpoint: string; note: string } | null>(null);
+  const [webhook, setWebhook] = useState<WebhookSecret | null>(null);
   const [assignOpen, setAssignOpen] = useState(false);
   const [dns, setDns] = useState<DnsResult | null>(null);
 
@@ -88,7 +105,7 @@ export function ProviderDetailPage() {
     success: (r) => (r.ok ? `Connection OK${r.latency_ms ? ` (${r.latency_ms} ms)` : ""}` : `Test failed: ${r.message}`),
   });
   const toggle = useAction((action: "enable" | "disable") => api.post<Provider>(`/admin/providers/${id}/${action}`), { ...inv, success: (p) => `Provider is now ${p.status}` });
-  const rotateWebhook = useAction(() => api.post<{ webhook_secret: string; endpoint: string; note: string }>(`/admin/providers/${id}/webhook-secret`), { invalidate: [["providers"]], onSuccess: setWebhook });
+  const rotateWebhook = useAction(() => api.post<WebhookSecret>(`/admin/providers/${id}/webhook-secret`), { invalidate: [["providers"]], onSuccess: setWebhook });
   const disableWebhook = useAction(() => api.del<Provider>(`/admin/providers/${id}/webhook-secret`), { invalidate: [["providers"]], success: "Webhook disabled" });
   const checkDns = useAction((selector: string) => api.get<DnsResult>(`/admin/providers/${id}/dns`, { selector }), { onSuccess: setDns });
   const unassign = useAction((aid: string) => api.del(`/admin/assignments/${aid}`), { invalidate: [["assignments"], ["providers"]], success: "Assignment revoked" });
@@ -156,6 +173,7 @@ export function ProviderDetailPage() {
                 ["Usage", p.usage ? `${fmt(p.usage.hour)} this hour · ${fmt(p.usage.day)} today` : "—"],
                 ["Last test", p.last_tested_at ? `${p.last_test_ok ? "Passed" : "Failed"} ${fmtRelative(p.last_tested_at)} — ${p.last_test_message ?? ""}` : "Never"],
                 ["Delivery webhook", p.webhook_enabled ? <Badge tone="success" icon={<Webhook />}>Enabled</Badge> : <Badge>Not configured</Badge>],
+                ["Delivered status", p.reports_delivery ? "Confirmed by provider events" : "SMTP acceptance counts as delivered"],
               ]}
             />
             {writable && (
@@ -213,6 +231,8 @@ export function ProviderDetailPage() {
           </CardBody>
         </Card>
       </div>
+
+      <BounceCard provider={p} writable={writable} />
 
       <Card className="mt-6">
         <CardHeader title="Health history" description="Rolling-window scores; providers are never disabled on a single failure." />
@@ -283,13 +303,144 @@ export function ProviderDetailPage() {
       <Dialog open={!!webhook} onClose={() => setWebhook(null)} title="Delivery webhook secret" description="Copy it now — it is shown only once.">
         {webhook && (
           <div className="space-y-4 text-sm">
-            <Field label="Endpoint">{() => <CopyField value={`${window.location.origin}${webhook.endpoint}`} />}</Field>
+            <Field label="Delivery events (JSON)">{() => <CopyField value={`${window.location.origin}${webhook.endpoint}`} />}</Field>
+            <Field label="Raw bounce / complaint emails">{() => <CopyField value={`${window.location.origin}${webhook.inbound_endpoint}`} />}</Field>
             <Field label="Signing secret">{() => <CopyField value={webhook.webhook_secret} />}</Field>
             <p className="text-fg-secondary">{webhook.note}</p>
           </div>
         )}
       </Dialog>
     </>
+  );
+}
+
+function BounceCard({ provider: p, writable }: { provider: Provider; writable: boolean }) {
+  const confirm = useConfirm();
+  const [editing, setEditing] = useState(false);
+  const base = `/admin/providers/${p.id}/bounce-mailbox`;
+  const test = useAction(() => api.post<{ ok: boolean; message: string }>(`${base}/test`), {
+    success: (r) => (r.ok ? r.message : `Test failed: ${r.message}`),
+  });
+  const poll = useAction(() => api.post<PollResult>(`${base}/poll`), {
+    invalidate: [["providers"]],
+    success: (r) =>
+      r.error ? `Polling failed: ${r.error}` : `Fetched ${r.fetched} message(s): ${r.accepted} applied, ${r.duplicates} duplicate, ${r.unmatched} unmatched, ${r.unrecognised} left unread`,
+  });
+  const remove = useAction(() => api.del<Provider>(base), { invalidate: [["providers"]], success: "Bounce mailbox removed" });
+  const mb = p.bounce_mailbox;
+  return (
+    <Card className="mt-6">
+      <CardHeader
+        title="Bounces & complaints"
+        description="Asynchronous bounce reports (DSN) and feedback-loop complaints (ARF) are read from this mailbox and suppress the address automatically."
+        actions={
+          writable && (
+            <Button size="sm" variant={mb ? "secondary" : "primary"} onClick={() => setEditing(true)}>
+              <Inbox /> {mb ? "Edit mailbox" : "Connect mailbox"}
+            </Button>
+          )
+        }
+      />
+      <CardBody>
+        {mb ? (
+          <>
+            <DefinitionList
+              items={[
+                ["Mailbox", `${mb.username} @ ${mb.host}:${mb.port} (${mb.ssl ? "TLS" : "STARTTLS"})`],
+                ["Folder", `${mb.folder}${mb.delete_processed ? " · processed reports are deleted" : " · processed reports are marked read"}`],
+                ["Last polled", p.bounce_last_polled_at ? fmtRelative(p.bounce_last_polled_at) : "Not yet"],
+                ["Reports applied", fmt(p.bounce_processed_total)],
+                ...(p.bounce_last_error ? ([["Last error", <span className="text-danger">{p.bounce_last_error}</span>]] as [string, ReactNode][]) : []),
+              ]}
+            />
+            {writable && (
+              <div className="mt-5 flex flex-wrap gap-2 border-t border-border pt-4">
+                <Button variant="secondary" size="sm" loading={test.isPending} onClick={() => test.mutate(undefined)}>
+                  <Plug /> Test connection
+                </Button>
+                <Button variant="secondary" size="sm" loading={poll.isPending} onClick={() => poll.mutate(undefined)}>
+                  <RefreshCw /> Poll now
+                </Button>
+                <Button
+                  variant="danger-ghost"
+                  size="sm"
+                  onClick={async () => {
+                    if (await confirm({ title: "Remove bounce mailbox?", message: "Bounces and complaints sent only by email will no longer be processed for this provider.", confirmLabel: "Remove", danger: true }))
+                      remove.mutate(undefined);
+                  }}
+                >
+                  <Trash2 /> Remove
+                </Button>
+              </div>
+            )}
+          </>
+        ) : (
+          <p className="text-sm text-fg-secondary">
+            {p.webhook_enabled
+              ? "No mailbox connected. Reports can still be delivered to the signed inbound endpoint shown when the webhook secret is rotated."
+              : "No mailbox connected. Connect the mailbox that receives this provider's bounces (Return-Path) and feedback-loop reports, or enable the webhook to post raw reports."}
+          </p>
+        )}
+      </CardBody>
+      {editing && <MailboxDialog id={p.id} mailbox={mb} onClose={() => setEditing(false)} />}
+    </Card>
+  );
+}
+
+function MailboxDialog({ id, mailbox, onClose }: { id: string; mailbox: BounceMailbox | null; onClose: () => void }) {
+  const save = useAction((body: unknown) => api.put<Provider>(`/admin/providers/${id}/bounce-mailbox`, body), {
+    invalidate: [["providers"]],
+    success: "Bounce mailbox saved",
+    onSuccess: onClose,
+  });
+  return (
+    <Dialog
+      open
+      onClose={onClose}
+      title="Bounce mailbox (IMAP)"
+      size="lg"
+      description="Use a dedicated mailbox. Only delivery reports and feedback-loop reports are processed; anything else is left unread."
+      footer={
+        <>
+          <Button variant="secondary" onClick={onClose}>
+            Cancel
+          </Button>
+          <Button type="submit" form="bounce-mailbox" loading={save.isPending}>
+            Save
+          </Button>
+        </>
+      }
+    >
+      <form
+        id="bounce-mailbox"
+        className="grid gap-4 sm:grid-cols-2"
+        onSubmit={(e) => {
+          e.preventDefault();
+          const f = new FormData(e.currentTarget);
+          save.mutate({
+            host: String(f.get("host")).trim(),
+            port: Number(f.get("port")),
+            ssl: f.get("ssl") === "on",
+            username: String(f.get("username")).trim(),
+            password: String(f.get("password") ?? "") || null,
+            folder: String(f.get("folder") ?? "").trim() || "INBOX",
+            delete_processed: f.get("delete_processed") === "on",
+          });
+        }}
+      >
+        <Field label="IMAP host">{(fid) => <Input id={fid} name="host" defaultValue={mailbox?.host} placeholder="imap.example.com" required />}</Field>
+        <Field label="Port">{(fid) => <Input id={fid} name="port" type="number" min={1} max={65535} defaultValue={mailbox?.port ?? 993} required />}</Field>
+        <Field label="Username">{(fid) => <Input id={fid} name="username" defaultValue={mailbox?.username} autoComplete="off" required />}</Field>
+        <Field label="Password" optional={!!mailbox} hint={mailbox ? "Leave empty to keep the stored password." : "Encrypted at rest; never shown again."}>
+          {(fid, d) => <Input id={fid} name="password" type="password" autoComplete="new-password" required={!mailbox} aria-describedby={d} />}
+        </Field>
+        <Field label="Folder">{(fid) => <Input id={fid} name="folder" defaultValue={mailbox?.folder ?? "INBOX"} />}</Field>
+        <div className="flex flex-col justify-end gap-3 pb-1">
+          <Checkbox name="ssl" defaultChecked={mailbox?.ssl ?? true} label="Implicit TLS (port 993); otherwise STARTTLS" />
+          <Checkbox name="delete_processed" defaultChecked={mailbox?.delete_processed ?? false} label="Delete reports after processing" />
+        </div>
+      </form>
+    </Dialog>
   );
 }
 

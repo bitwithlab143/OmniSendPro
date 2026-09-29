@@ -5,7 +5,7 @@
 > - Work tracking: [`PROGRESS.md`](./PROGRESS.md). Each task there references the `DS-xx` / `ADR-xxx` item it implements.
 
 **Last updated:** 2026-09-29
-**Document version:** 0.3.0
+**Document version:** 0.4.1
 
 ---
 
@@ -47,6 +47,8 @@
 | [DS-13](#ds-13-user-panel-ui) | User Panel UI | Implemented | §7, §51 |
 | [DS-14](#ds-14-infrastructure--deployment) | Infrastructure, deployment & DR | Implemented | §35, §37–§40, §46, §65 |
 | [DS-15](#ds-15-observability-metrics--testing) | Observability, metrics & testing | Implemented | §43–§44, §63–§64 |
+| [DS-16](#ds-16-asynchronous-bounces--complaints-dsn--arf) | Asynchronous bounces & complaints (DSN / ARF) | Implemented | §23, §24, P2-10 |
+| [DS-17](#ds-17-api-keys) | API keys | Accepted | §6 (System → API Keys), §32, P2-15 |
 
 ---
 
@@ -523,6 +525,73 @@ Screens:
 
 ---
 
+## DS-16 Asynchronous bounces & complaints (DSN / ARF)
+
+**Status:** Implemented (2026-09-29) — closes compliance gap R-07 / task P2-10.
+
+Plain-SMTP providers accept a message (250) and report problems **later** by email: bounces as
+Delivery Status Notifications (DSN, RFC 3464) and complaints as ARF feedback reports (RFC 5965, via
+feedback loops). Without processing these, hard bounces and complaints are never suppressed.
+
+**Ingestion paths** (ADR-011), both per provider and both optional:
+1. **Bounce mailbox (IMAP).** Admin configures host/port/TLS/username/password(encrypted)/folder on the
+   provider. The scheduler leader polls every `bounce_poll_interval_seconds` (default 60) as part of its tick, fetches up to 200 unseen messages, processes them and marks them `\Seen` (or deletes them if
+   configured). Point the provider's bounce/Return-Path and FBL address at this mailbox.
+2. **Signed raw-message endpoint.** `POST /api/v1/hooks/providers/{id}/inbound` with the raw RFC 5322
+   message as body (`Content-Type: message/rfc822`), signed exactly like delivery webhooks (HMAC over
+   `timestamp.body`). For relays that can pipe mail to a command (e.g. Postfix `pipe` + the provided
+   `infrastructure/deployment/forward-bounce.sh`).
+
+**Parsing** (`backend/app/services/inbound.py`):
+
+| Report | Detection | Result |
+|---|---|---|
+| DSN | `multipart/report; report-type=delivery-status` | one event per `Final-Recipient` block |
+| ARF | `multipart/report; report-type=feedback-report` | `complained` (Feedback-Type abuse/fraud/virus/other) |
+| anything else | – | counted as *unrecognised*, left for a human (never guessed) |
+
+DSN classification per recipient (`Action` + `Status`):
+- `failed` + `5.1.x` (bad address/mailbox/domain) or `5.2.1` (disabled) → **hard bounce** → global suppression.
+- other `failed` + `5.x.x` → **soft bounce** (stored as a deferral event, like soft bounces from webhooks; not suppressed, not counted as bounced).
+- `delayed` or `4.x.x` → **deferred** (informational).
+- `delivered` / `relayed` / `expanded` → **delivered**.
+
+**Correlation** to a recipient, in order: the original `Message-ID` found in the attached original message
+/ headers part (our Message-ID is the stored `provider_message_id`); otherwise `X-OmniSend-Campaign` +
+`Final-Recipient`/`Original-Recipient` (campaign + normalised email). Unmatched reports are counted
+but ignored — the system never suppresses an address it cannot tie to a message it sent.
+
+Idempotency: events reuse the webhook path (`events.ingest`) and its unique index, so re-reading a
+mailbox never double-counts. Security: reports are processed only from the configured mailbox or a
+valid signature; bodies are size-limited (1 MB) and parsed with the stdlib email parser (no HTML
+rendering, no attachments executed).
+
+---
+
+## DS-17 API keys
+
+**Status:** Accepted (2026-09-29) — task P2-15.
+
+Programmatic access for integrations (CRM, data pipelines) to the **User API** only (ADR-012).
+
+- **Format:** `osk_<8-char prefix>_<32-byte secret>`, shown **once**. Stored as SHA-256 hash + prefix
+  (for display/lookup). Optional expiry (days). Revocable; revocation is immediate.
+- **Owner:** always a USER account. Created by the user (Profile → API keys) or by an admin with
+  `users.write` (Admin → System → API Keys) on the user's behalf.
+- **Scopes:** subset of the USER permissions — `campaigns.read`, `campaigns.write`, `campaigns.start`,
+  `campaigns.stop`, `providers.read`, `reports.read`. Effective permissions = scopes ∩ owner's role
+  permissions, evaluated on every request (a suspended owner disables the key).
+- **Auth:** `Authorization: Bearer osk_…` on `/api/v1/user/*`. Keys are rejected on admin, auth and
+  worker APIs. No cookies, so no CSRF surface. Profile-changing endpoints (password, 2FA, API-key
+  management) are **not** allowed with an API key.
+- **Rate limit:** `api_key_requests_per_minute` (default 600) per key, Redis counter → `429`.
+- **Audit & usage:** `API_KEY_CREATED` / `API_KEY_REVOKED` audited; `last_used_at` / `last_used_ip`
+  updated at most once per minute.
+- **Table `api_keys`:** id, user_id, name, prefix (unique), key_hash (unique), scopes (JSONB),
+  created_by, created_at, expires_at, revoked_at, last_used_at, last_used_ip.
+
+---
+
 ## Architecture Decision Records (ADRs)
 
 Format: **Context → Decision → Consequences**. Status: Proposed / Accepted / Superseded.
@@ -578,6 +647,23 @@ Format: **Context → Decision → Consequences**. Status: Proposed / Accepted /
 - **Status:** Accepted (implemented 2026-09-29)
 - **Decision:** Claim with `SELECT … FOR UPDATE SKIP LOCKED` and set `lease_expires_at`. Workers renew the lease every `lease/3`. The scheduler returns expired leases to `retry`. Each claim creates a `job_attempts` row, and ack/failure must reference the current attempt.
 - **Consequences:** Only one worker can own a job (§31), and crashed workers' jobs are recovered automatically (§47).
+
+### ADR-011: Bounce/complaint ingestion via IMAP polling + signed raw endpoint (no inbound SMTP server)
+- **Status:** Accepted (2026-09-29)
+- **Context:** Plain-SMTP providers deliver DSNs and ARF reports by email. Running our own inbound MX
+  adds an internet-facing SMTP service to secure and operate.
+- **Decision:** Read a dedicated mailbox over IMAP (works with any mail host) and additionally accept
+  raw messages on a signed HTTP endpoint for relays that can pipe mail. Parsing is shared.
+- **Consequences:** No new public port. Latency = poll interval (default 60 s), acceptable for
+  suppression. IMAP credentials are encrypted like provider secrets.
+
+### ADR-012: API keys are for the User API only
+- **Status:** Accepted (2026-09-29)
+- **Context:** Admin access requires TOTP (§32); a static key would bypass it and widen the blast radius.
+- **Decision:** Keys belong to USER accounts, carry explicit scopes, and are accepted only on
+  `/api/v1/user/*` (excluding credential/profile management). Admin automation stays interactive.
+- **Consequences:** Integrations can create/upload/start/monitor campaigns; admin tasks cannot be
+  scripted with keys (revisit with a separate, IP-restricted service-account design if needed).
 
 ---
 
@@ -696,8 +782,17 @@ relative to the repository root.
 22. **Startup bootstrap lock.** Reference data and the bootstrap admin run under a PostgreSQL advisory
     lock so several API processes can start simultaneously.
 
+23. **Explicit `reports_delivery` flag (DS-16).** Whether SMTP acceptance counts as *delivered* used to be
+    implied by "has a webhook secret". Since a secret may now exist only to sign raw bounce reports, the
+    provider has an explicit `reports_delivery` flag (migration 0003 sets it for providers that already
+    had a webhook secret, preserving behaviour).
+24. **Bounce mailbox safety.** The IMAP host goes through the same SSRF guard as the SMTP connection test
+    (link-local / metadata addresses refused); plain IMAP is only used when the server offers STARTTLS.
+    Messages are fetched with `BODY.PEEK[]` and flagged only after processing; unrecognised mail stays
+    unread for a human. A provider can only affect messages sent through it (`campaign.provider_id`).
+
 ### Not yet implemented (tracked in PROGRESS.md)
-DSN/ARF bounce and complaint ingestion (P2-10), API keys (P2-15), SSE (P3-03), object-storage
+API keys (P2-15), SSE (P3-03), object-storage
 uploads (P3-04/05), a dedicated scheduler and event-processor process (P3-02/06), partitioning and
 retention (P3-11/12), and Phase 4 hardening.
 
@@ -707,6 +802,8 @@ retention (P3-11/12), and Phase 4 hardening.
 
 Newest first.
 
+- **2026-09-29 · v0.4.1**: DS-16 implemented; implementation notes 23–24 (explicit `reports_delivery` flag, bounce-mailbox safety).
+- **2026-09-29 · v0.4.0**: Added DS-16 (DSN/ARF ingestion), DS-17 (API keys), ADR-011, ADR-012 for the Phase 2 remainder.
 - **2026-09-29 · v0.3.0**: Performance pass — implementation notes 18–22 (compiled messages, SMTP pool reuse, provider `max_connections`, scheduler wake-up, bootstrap lock). Measurements in `docs/PERFORMANCE.md`.
 - **2026-09-29 · v0.2.0**: Implemented DS-01…DS-15 and ADR-001…ADR-010. OQ-01…OQ-14 adopted as defaults. Added §Implementation notes (code map + 17 refinements).
 - **2026-09-29 · v0.1.0**: Initial design document extracted from `ARCHITECTURE.md`. Added DS-01…DS-15, proposed ADR-001…ADR-010, and logged OQ-01…OQ-15.

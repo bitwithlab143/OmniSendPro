@@ -12,7 +12,7 @@ from sqlalchemy import func, select
 from sqlalchemy.exc import IntegrityError
 
 from app.api.deps import DB, Ctx, Principal, require
-from app.core.errors import conflict, not_found
+from app.core.errors import bad_request, conflict, not_found
 from app.core.pagination import Page, paginate
 from app.core.security import encrypt_secret, encryption_key_version
 from app.models import Provider, ProviderAssignment, ProviderCredential, ProviderHealthLog, User
@@ -20,6 +20,7 @@ from app.models.enums import AssignmentStatus, ProviderStatus, RoleName
 from app.schemas.domain import (
     AssignmentCreate,
     AssignmentOut,
+    BounceMailboxIn,
     HealthLogOut,
     ProviderCreate,
     ProviderDetail,
@@ -28,7 +29,7 @@ from app.schemas.domain import (
     ProviderUpdate,
     ProviderUsage,
 )
-from app.services import audit, quotas
+from app.services import audit, bounce_mailbox, quotas
 from app.services import providers as provider_service
 
 router = APIRouter(tags=["admin:providers"])
@@ -37,7 +38,7 @@ Read = Annotated[Principal, Depends(require("providers.read"))]
 Write = Annotated[Principal, Depends(require("providers.write"))]
 
 _TRACKED = ("provider_name", "host", "port", "username", "tls_mode", "from_email", "from_name",
-            "hourly_limit", "daily_limit", "per_second_limit", "max_connections")
+            "hourly_limit", "daily_limit", "per_second_limit", "max_connections", "reports_delivery")
 
 
 def serialize(p: Provider) -> ProviderOut:
@@ -114,7 +115,7 @@ async def update_provider(provider_id: uuid.UUID, body: ProviderUpdate, db: DB, 
     data = body.model_dump(exclude_unset=True)
     before = {k: getattr(provider, k) for k in data}
     for key, value in data.items():
-        if key in ("provider_name", "host", "port", "tls_mode", "from_email") and value is None:
+        if key in ("provider_name", "host", "port", "tls_mode", "from_email", "reports_delivery") and value is None:
             continue
         setattr(provider, key, value)
     try:
@@ -151,8 +152,10 @@ async def rotate_webhook_secret(provider_id: uuid.UUID, db: DB, _: Write, ctx: C
     return {
         "webhook_secret": secret,
         "endpoint": f"/api/v1/hooks/providers/{provider.id}",
+        "inbound_endpoint": f"/api/v1/hooks/providers/{provider.id}/inbound",
         "note": "Shown once. Sign requests with HMAC-SHA256 over '<timestamp>.<body>' "
-                "(headers X-OmniSend-Timestamp and X-OmniSend-Signature).",
+                "(headers X-OmniSend-Timestamp and X-OmniSend-Signature). The inbound endpoint accepts "
+                "raw bounce (DSN) and complaint (ARF) emails, e.g. piped from your MTA.",
     }
 
 
@@ -179,6 +182,54 @@ async def _set_status(db: DB, ctx: Ctx, provider_id: uuid.UUID, status: Provider
     await db.commit()
     await db.refresh(provider)
     return serialize(provider)
+
+
+@router.put("/providers/{provider_id}/bounce-mailbox", response_model=ProviderOut)
+async def set_bounce_mailbox(provider_id: uuid.UUID, body: BounceMailboxIn, db: DB, _: Write, ctx: Ctx) -> ProviderOut:
+    """Configure the IMAP mailbox that receives this provider's bounces (DSN) and complaints (ARF)."""
+    provider = await _get(db, provider_id)
+    if body.password is None and not provider.bounce_mailbox_secret_encrypted:
+        raise bad_request("A password is required for a new bounce mailbox", "password_required")
+    provider.bounce_mailbox = body.model_dump(exclude={"password"})
+    if body.password is not None:
+        provider.bounce_mailbox_secret_encrypted = encrypt_secret(body.password)
+    provider.bounce_last_error = None
+    audit.record(db, ctx, "PROVIDER_BOUNCE_MAILBOX_SET", "provider", provider.id,
+                 new={k: v for k, v in provider.bounce_mailbox.items() if k != "username"})
+    await db.commit()
+    await db.refresh(provider)
+    return serialize(provider)
+
+
+@router.delete("/providers/{provider_id}/bounce-mailbox", response_model=ProviderOut)
+async def remove_bounce_mailbox(provider_id: uuid.UUID, db: DB, _: Write, ctx: Ctx) -> ProviderOut:
+    provider = await _get(db, provider_id)
+    provider.bounce_mailbox = None
+    provider.bounce_mailbox_secret_encrypted = None
+    audit.record(db, ctx, "PROVIDER_BOUNCE_MAILBOX_REMOVED", "provider", provider.id)
+    await db.commit()
+    await db.refresh(provider)
+    return serialize(provider)
+
+
+@router.post("/providers/{provider_id}/bounce-mailbox/test")
+async def test_bounce_mailbox(provider_id: uuid.UUID, db: DB, _: Write) -> dict[str, Any]:
+    provider = await _get(db, provider_id)
+    cfg = bounce_mailbox.config_for(provider)
+    if cfg is None:
+        raise bad_request("No bounce mailbox configured", "not_configured")
+    return await bounce_mailbox.test_mailbox(cfg)
+
+
+@router.post("/providers/{provider_id}/bounce-mailbox/poll")
+async def poll_bounce_mailbox(provider_id: uuid.UUID, db: DB, _: Write, ctx: Ctx) -> dict[str, Any]:
+    provider = await _get(db, provider_id)
+    if bounce_mailbox.config_for(provider) is None:
+        raise bad_request("No bounce mailbox configured", "not_configured")
+    totals = await bounce_mailbox.poll_provider(db, provider)
+    audit.record(db, ctx, "PROVIDER_BOUNCE_MAILBOX_POLLED", "provider", provider.id, new=totals)
+    await db.commit()
+    return {**totals, "error": provider.bounce_last_error}
 
 
 @router.post("/providers/{provider_id}/enable", response_model=ProviderOut)

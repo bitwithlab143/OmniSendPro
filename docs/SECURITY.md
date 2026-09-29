@@ -11,10 +11,11 @@ Implements ARCHITECTURE.md §32–§34, §45, §48 (design DS-10, DS-11, ADR-005
 | CSRF | SameSite=Strict + mandatory `X-Requested-With` on cookie endpoints; API otherwise uses bearer tokens |
 | Worker auth | Per-worker credential (hashed), exchanged for a short-lived token with a separate signing key and audience; worker tokens cannot call user/admin APIs; disabled workers are rejected |
 | RBAC | Role → permission matrix in `app/core/rbac.py`; only SUPER_ADMIN manages admin accounts; users can only reach their own campaigns and assigned providers |
-| Secrets at rest | Provider passwords, webhook secrets and TOTP seeds: AES-256-GCM with versioned keys; never returned by the API; redacted from audit logs |
+| Secrets at rest | Provider passwords, bounce-mailbox passwords, webhook secrets and TOTP seeds: AES-256-GCM with versioned keys; never returned by the API; redacted from audit logs |
 | Input validation | Pydantic schemas, header-injection checks on subject/from name, LIKE-wildcard escaping, CSV formula neutralisation in exports, request-size limits (API + nginx) |
 | Outbound | Provider test refuses link-local/metadata addresses; email merge values are HTML-escaped / header-stripped; preview iframe is fully sandboxed |
 | Webhooks | HMAC-SHA256 over timestamp + body, 5-minute replay window, de-duplication |
+| Bounce / complaint reports | Parsed with the standard-library email parser only (nothing rendered or executed), 1 MB cap; a provider can only affect messages sent through it; the IMAP mailbox needs TLS or STARTTLS and link-local/metadata hosts are refused; unrecognised mail is left unread |
 | Headers | API: nosniff, DENY framing, no-referrer, CSP `default-src 'none'`, HSTS in production. Panels (nginx): strict CSP without inline scripts |
 | Audit | Append-only `audit_logs` for every sensitive action (who, what, old/new, IP, user agent) |
 | Compliance | Consent confirmation to start, automatic unsubscribe/bounce/complaint suppression, one-click unsubscribe, provider limits enforced |

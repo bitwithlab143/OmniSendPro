@@ -168,6 +168,14 @@ class Provider(TimestampMixin, Base):
     per_second_limit: Mapped[int | None] = mapped_column(Integer)
     # Max simultaneous SMTP connections one worker opens to this provider (provider policy). None = worker default.
     max_connections: Mapped[int | None] = mapped_column(Integer)
+    # Bounce/FBL mailbox (DS-16): {host, port, ssl, username, folder, delete_processed}; password encrypted.
+    bounce_mailbox: Mapped[dict[str, Any] | None] = mapped_column(JSONB)
+    bounce_mailbox_secret_encrypted: Mapped[str | None] = mapped_column(Text)
+    bounce_last_polled_at: Mapped[datetime | None] = ts()
+    bounce_last_error: Mapped[str | None] = mapped_column(String(512))
+    bounce_processed_total: Mapped[int] = mapped_column(Integer, default=0, server_default=text("0"))
+    # True when the provider confirms deliveries through the webhook; otherwise SMTP acceptance = delivered.
+    reports_delivery: Mapped[bool] = mapped_column(Boolean, default=False, server_default=text("false"))
     status: Mapped[ProviderStatus] = mapped_column(
         enum_col(ProviderStatus, "provider_status"), default=ProviderStatus.ACTIVE, index=True
     )

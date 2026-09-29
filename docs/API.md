@@ -24,7 +24,7 @@ and Swagger UI at `/api/docs` in non-production environments; it is the canonica
 |---|---|
 | Dashboard & reports [`reports.read`] | `GET /dashboard`, `GET /reports/summary?days=`, `GET /reports/breakdown?group=user\|provider` |
 | Users [`users.*`] | `GET/POST /users`, `GET/PATCH /users/{id}`, `POST /users/{id}/suspend\|activate\|disable`, `PUT /users/{id}/limits`, `POST /users/{id}/password`, `POST /users/{id}/reset-2fa` |
-| Providers [`providers.*`] | `GET/POST /providers`, `GET/PATCH /providers/{id}`, `PUT /providers/{id}/secret`, `POST /providers/{id}/enable\|disable\|test`, `GET /providers/{id}/dns?selector=`, `GET /providers/{id}/health`, `POST/DELETE /providers/{id}/webhook-secret` |
+| Providers [`providers.*`] | `GET/POST /providers`, `GET/PATCH /providers/{id}`, `PUT /providers/{id}/secret`, `POST /providers/{id}/enable\|disable\|test`, `GET /providers/{id}/dns?selector=`, `GET /providers/{id}/health`, `POST/DELETE /providers/{id}/webhook-secret`, `PUT/DELETE /providers/{id}/bounce-mailbox`, `POST /providers/{id}/bounce-mailbox/test\|poll` |
 | Assignments [`providers.*`] | `GET/POST /assignments`, `DELETE /assignments/{id}` |
 | Campaigns [`campaigns.*`] | `GET/POST /campaigns` (`view=pending\|processing\|completed\|failed`), `GET/PATCH /campaigns/{id}`, `POST/DELETE/GET /campaigns/{id}/recipients`, `POST /campaigns/{id}/start\|pause\|resume\|cancel`, `GET /campaigns/{id}/stats\|report\|report.csv\|jobs` |
 | Workers [`workers.*`] | `GET/POST /workers` (POST returns the credential once), `GET/PATCH /workers/{id}`, `POST /workers/{id}/disable\|enable\|rotate-credential`, `GET /workers/{id}/heartbeats` |
@@ -53,4 +53,9 @@ provider assigned & healthy, From domain matches the provider, per-campaign reci
   than 5 minutes are rejected. Body: `{"events": [{"type": "delivered|bounced|complained|deferred|unsubscribed",
   "provider_message_id": "<Message-ID>", "bounce_type": "hard|soft", "error_code", "error_message"}]}`.
   Events are de-duplicated on (provider, message id, type).
+- `POST /hooks/providers/{provider_id}/inbound` — one raw RFC 5322 bounce (DSN, RFC 3464) or complaint
+  (ARF, RFC 5965) email, signed exactly like the delivery webhook (max 1 MB). Response
+  `{"kind": "dsn|arf|unknown", "accepted", "duplicates", "unmatched"}`. Reports are matched by the original
+  Message-ID, else by `X-OmniSend-Campaign` + recipient address, and only to messages sent through that
+  provider. `infrastructure/deployment/forward-bounce.sh` pipes a message from an MTA (design DS-16).
 - `GET /u/{token}` shows an unsubscribe confirmation page; `POST /u/{token}` unsubscribes (also RFC 8058 one-click).

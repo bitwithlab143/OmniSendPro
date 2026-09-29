@@ -1,4 +1,4 @@
-import { Field, Input, Select } from "@omnisend/web-shared";
+import { Checkbox, Field, Input, Select } from "@omnisend/web-shared";
 
 import type { Provider } from "../types";
 
@@ -20,6 +20,7 @@ export function providerBody(f: FormData, includePassword: boolean): Record<stri
     daily_limit: numOrNull(f.get("daily_limit")),
     per_second_limit: numOrNull(f.get("per_second_limit")),
     max_connections: numOrNull(f.get("max_connections")),
+    reports_delivery: f.get("reports_delivery") === "on",
   };
   if (includePassword && f.get("password")) body.password = f.get("password");
   return body;
@@ -56,6 +57,12 @@ export function ProviderFields({ provider, withPassword }: { provider?: Provider
       <Field label="Max connections" optional hint="Simultaneous SMTP sessions per worker allowed by the provider. Higher = faster over real networks.">
         {(id, d) => <Input id={id} name="max_connections" type="number" min={1} max={500} defaultValue={provider?.max_connections ?? ""} aria-describedby={d} />}
       </Field>
+      <Checkbox
+        className="sm:col-span-2"
+        name="reports_delivery"
+        defaultChecked={provider?.reports_delivery ?? false}
+        label="The provider sends “delivered” events to the delivery webhook. Leave unchecked to count SMTP acceptance as delivered."
+      />
     </div>
   );
 }

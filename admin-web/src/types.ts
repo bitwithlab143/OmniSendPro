@@ -35,6 +35,11 @@ export interface Provider {
   daily_limit: number | null;
   per_second_limit: number | null;
   max_connections: number | null;
+  reports_delivery: boolean;
+  bounce_mailbox: BounceMailbox | null;
+  bounce_last_polled_at: string | null;
+  bounce_last_error: string | null;
+  bounce_processed_total: number;
   status: "ACTIVE" | "WARNING" | "DEGRADED" | "DISABLED";
   status_reason: string | null;
   health_score: number;
@@ -47,6 +52,15 @@ export interface Provider {
   updated_at: string;
   usage?: { hour: number; day: number } | null;
   assigned_users?: number;
+}
+
+export interface BounceMailbox {
+  host: string;
+  port: number;
+  ssl: boolean;
+  username: string;
+  folder: string;
+  delete_processed: boolean;
 }
 
 export interface Assignment {

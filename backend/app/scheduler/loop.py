@@ -22,8 +22,8 @@ import time
 from app.core.config import get_settings
 from app.core.redis import Keys, get_redis
 from app.db.session import sessionmaker
+from app.services import bounce_mailbox, health
 from app.services import campaigns as campaign_service
-from app.services import health
 from app.services import jobs as job_service
 from app.services import workers as worker_service
 
@@ -52,7 +52,7 @@ class Scheduler:
 
     async def tick(self) -> dict[str, int]:
         """One scheduler pass. Public so tests and ops tooling can drive it deterministically."""
-        stats = {"built": 0, "recovered": 0, "offline": 0, "completed": 0, "health_changes": 0}
+        stats = {"built": 0, "recovered": 0, "offline": 0, "completed": 0, "health_changes": 0, "bounce_reports": 0}
         maker = sessionmaker()
         async with maker() as db:
             for cid in await campaign_service.campaigns_needing_batches(db):
@@ -71,6 +71,8 @@ class Scheduler:
                 async with maker() as cdb:
                     if await campaign_service.check_completion(cdb, cid):
                         stats["completed"] += 1
+        async with maker() as db:
+            stats["bounce_reports"] = await bounce_mailbox.poll_due(db)
         if time.monotonic() - self._last_health >= self.settings.health_interval_seconds:
             self._last_health = time.monotonic()
             async with maker() as db:

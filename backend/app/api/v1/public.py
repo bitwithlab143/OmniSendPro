@@ -19,7 +19,7 @@ from app.core.redis import get_redis
 from app.core.security import decrypt_secret, verify_webhook_signature
 from app.models import Provider
 from app.schemas.domain import WebhookPayload
-from app.services import events
+from app.services import events, inbound
 
 router = APIRouter(tags=["public"])
 
@@ -48,6 +48,29 @@ async def provider_webhook(provider_id: uuid.UUID, request: Request, db: DB) -> 
     result = await events.ingest(db, provider.id, [e.model_dump() for e in payload.events])
     return {"accepted": result.accepted, "duplicates": result.duplicates, "unknown": result.unknown,
             "rejected": len(result.errors)}
+
+
+@router.post("/hooks/providers/{provider_id}/inbound")
+async def provider_inbound_message(provider_id: uuid.UUID, request: Request, db: DB) -> dict[str, object]:
+    """Raw bounce (DSN) / complaint (ARF) email, e.g. piped from an MTA (design DS-16).
+
+    Body is the raw RFC 5322 message; signed like delivery webhooks (HMAC over "<timestamp>.<body>").
+    """
+    provider = await db.get(Provider, provider_id)
+    if provider is None or not provider.webhook_secret_encrypted:
+        raise ApiError(404, "not_found", "Unknown endpoint")
+    body = await request.body()
+    if len(body) > inbound.MAX_REPORT_BYTES:
+        raise ApiError(413, "payload_too_large", "Message too large")
+    if not verify_webhook_signature(
+        decrypt_secret(provider.webhook_secret_encrypted),
+        body,
+        request.headers.get("x-omnisend-timestamp", ""),
+        request.headers.get("x-omnisend-signature", ""),
+    ):
+        raise ApiError(401, "invalid_signature", "Invalid signature")
+    result = await inbound.process_raw(db, provider, body)
+    return result.as_dict()
 
 
 _PAGE = """<!doctype html><html lang="en"><head><meta charset="utf-8">

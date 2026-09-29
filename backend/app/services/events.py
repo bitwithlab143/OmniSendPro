@@ -16,6 +16,7 @@ from app.models import Campaign, CampaignRecipient, EmailEvent
 from app.models.enums import EventType, RecipientStatus, SuppressionType
 from app.services import health, suppression
 from app.services.jobs import UNSUBSCRIBE_PURPOSE
+from app.services.recipients import normalize_email
 
 SUPPORTED = {"delivered", "bounced", "complained", "deferred", "unsubscribed"}
 # Final statuses a later event may not downgrade.
@@ -34,27 +35,52 @@ class IngestResult:
     errors: list[str] = field(default_factory=list)
 
 
+async def _find_recipient(db: AsyncSession, ev: dict[str, Any]) -> CampaignRecipient | None:
+    """Correlate an event to a sent message: provider message id first, else campaign + address."""
+    mid = ev.get("provider_message_id")
+    if mid:
+        found = (
+            await db.execute(select(CampaignRecipient).where(CampaignRecipient.provider_message_id == str(mid)))
+        ).scalar_one_or_none()
+        if found is not None:
+            return found
+    campaign_id, email = ev.get("campaign_id"), ev.get("email")
+    if campaign_id and email:
+        return (
+            await db.execute(
+                select(CampaignRecipient).where(
+                    CampaignRecipient.campaign_id == campaign_id,
+                    CampaignRecipient.email_normalized == normalize_email(str(email)),
+                    CampaignRecipient.provider_message_id.is_not(None),  # only messages we actually sent
+                )
+            )
+        ).scalar_one_or_none()
+    return None
+
+
 async def ingest(db: AsyncSession, provider_id: uuid.UUID, events: list[dict[str, Any]]) -> IngestResult:
     result = IngestResult()
     for ev in events:
         etype = str(ev.get("type", "")).lower()
-        mid = ev.get("provider_message_id")
-        if etype not in SUPPORTED or not mid:
-            result.errors.append(f"unsupported event {etype!r} or missing provider_message_id")
+        if etype not in SUPPORTED or not (ev.get("provider_message_id") or (ev.get("campaign_id") and ev.get("email"))):
+            result.errors.append(f"unsupported event {etype!r} or no message reference")
             continue
-        recipient = (
-            await db.execute(select(CampaignRecipient).where(CampaignRecipient.provider_message_id == str(mid)))
-        ).scalar_one_or_none()
+        recipient = await _find_recipient(db, ev)
         if recipient is None:
             result.unknown += 1
             continue
         campaign = await db.get(Campaign, recipient.campaign_id)
         assert campaign is not None
-        bounce_type = str(ev.get("bounce_type", "hard")).lower()
+        if campaign.provider_id != provider_id:
+            # A provider may only report on messages that were sent through it.
+            result.unknown += 1
+            continue
+        bounce_type = str(ev.get("bounce_type") or "hard").lower()
         stored_type = EventType(etype)
         if etype == "bounced" and bounce_type != "hard":
             stored_type = EventType.DEFERRED  # soft bounce: informational only
 
+        mid = recipient.provider_message_id
         inserted = (
             await db.execute(
                 insert(EmailEvent)
@@ -64,8 +90,8 @@ async def ingest(db: AsyncSession, provider_id: uuid.UUID, events: list[dict[str
                     provider_id=provider_id,
                     user_id=campaign.user_id,
                     event_type=stored_type,
-                    provider_message_id=str(mid),
-                    error_code=(str(ev.get("error_code")) if ev.get("error_code") else None),
+                    provider_message_id=mid,
+                    error_code=(str(ev.get("error_code"))[:64] if ev.get("error_code") else None),
                     error_message=(str(ev.get("error_message"))[:512] if ev.get("error_message") else None),
                 )
                 .on_conflict_do_nothing()
@@ -90,6 +116,10 @@ async def _apply(db: AsyncSession, campaign: Campaign, recipient: CampaignRecipi
         EventType.UNSUBSCRIBED: RecipientStatus.UNSUBSCRIBED,
     }.get(etype)
     counters: dict[str, Any] = {}
+    if new_status is not None and recipient.status == new_status:
+        # Already recorded (e.g. SMTP-time rejection followed by a DSN): keep the event, don't re-count.
+        recipient.last_event_at = datetime.now(UTC)
+        return
     if etype == EventType.DELIVERED:
         counters["delivered"] = Campaign.delivered + 1
     elif etype == EventType.BOUNCED:
