@@ -1,0 +1,612 @@
+# OmniSendPro — Design Document
+
+> Living record of **how** the system is designed: components, data model, state machines, API contracts, UI screens, and the decisions behind them.
+> - Baseline spec: [`ARCHITECTURE.md`](./ARCHITECTURE.md) (§ numbers below refer to it)
+> - Work tracking: [`PROGRESS.md`](./PROGRESS.md). Each task there references the `DS-xx` / `ADR-xxx` item it implements.
+
+**Last updated:** 2026-09-29
+**Document version:** 0.1.0
+
+---
+
+## How to use this file
+
+- Each design area has a stable ID (`DS-01` … `DS-15`). Tasks in `PROGRESS.md` point to these IDs.
+- Every design item carries a **status**:
+
+| Status | Meaning |
+|---|---|
+| **Baseline** | Taken directly from `ARCHITECTURE.md`; do not change without an ADR |
+| **Proposed** | Fills a gap or refines the baseline; needs review before implementation |
+| **Accepted** | Reviewed and approved; implement as written |
+| **Implemented** | Built; the section describes the code as it is (link the code) |
+| **Superseded** | Replaced; keep for history and link the replacement |
+
+- Significant decisions become **ADRs** (Architecture Decision Records) in [§ADRs](#architecture-decision-records-adrs).
+- Unresolved questions go to [§Open Questions](#open-questions). **Do not implement against an open question.** Resolve it first and record the answer.
+- When implementation diverges from a design, update the design **in the same change** and log it in the [Design changelog](#design-changelog) and in `PROGRESS.md` → Decision log.
+
+---
+
+## Design index
+
+| ID | Area | Status | Arch § |
+|---|---|---|---|
+| [DS-01](#ds-01-system-context--repository-layout) | System context & repository layout | Baseline | §1, §4, §36, §66 |
+| [DS-02](#ds-02-planes--core-pipeline) | Planes & core pipeline | Baseline | §1, §5, §67 |
+| [DS-03](#ds-03-data-model) | Data model | Baseline + Proposed | §25–§29, §57 |
+| [DS-04](#ds-04-campaign-state-machine) | Campaign state machine | Baseline + Proposed | §50 |
+| [DS-05](#ds-05-queue-jobs-scheduling-retry--events) | Queue, jobs, scheduling, retry & events | Baseline + Proposed | §11–§14, §21–§23, §30–§31, §60–§61 |
+| [DS-06](#ds-06-providers) | Providers: records, assignment, health | Baseline + Proposed | §15–§18 |
+| [DS-07](#ds-07-recipients--suppression) | Recipients, uploads & suppression | Baseline + Proposed | §24, §55–§56 |
+| [DS-08](#ds-08-worker) | Worker runtime | Baseline + Proposed | §8–§10, §41 |
+| [DS-09](#ds-09-api) | API surface & conventions | Baseline + Proposed | §33, §53–§54 |
+| [DS-10](#ds-10-authentication--authorization) | Authentication & authorization | Baseline | §32, §49 |
+| [DS-11](#ds-11-security-secrets--audit) | Security, secrets & audit | Baseline | §34, §45, §48 |
+| [DS-12](#ds-12-admin-panel-ui) | Admin Panel UI | Baseline | §6, §42, §52 |
+| [DS-13](#ds-13-user-panel-ui) | User Panel UI | Baseline | §7, §51 |
+| [DS-14](#ds-14-infrastructure--deployment) | Infrastructure, deployment & DR | Baseline | §35, §37–§40, §46, §65 |
+| [DS-15](#ds-15-observability-metrics--testing) | Observability, metrics & testing | Baseline | §43–§44, §63–§64 |
+
+---
+
+## DS-01 System context & repository layout
+
+**Status:** Baseline
+
+Three primary layers (§1): the **Admin Control Plane**, the **User Application**, and **Distributed Email Workers**.
+
+```text
+admin-web ─┐                    ┌─> PostgreSQL (source of truth)
+           ├─> backend (API) ───┤
+user-web ──┘                    └─> Redis (queue, locks, rate limits, live stats)
+                                        │
+                              worker-01 … worker-N ──> approved providers/SMTP
+                                        │
+                              delivery events ──> event processor ──> PostgreSQL ──> reports
+```
+
+**Repository layout.** The repo root is `OmniSendPro/`; the spec calls it `email-platform/`.
+
+```text
+OmniSendPro/
+├── admin-web/          React + TS + Vite + Tailwind + shadcn/ui
+├── user-web/           React + TS + Vite + Tailwind + shadcn/ui
+├── backend/
+│   ├── app/{api,auth,models,schemas,services,repositories,queue,providers,reports}/
+│   ├── migrations/     Alembic
+│   ├── tests/
+│   └── main.py
+├── worker/
+│   ├── app/{queue,sender,providers,retry,rate_limit,health,reporting}/
+│   ├── tests/
+│   └── worker.py
+├── infrastructure/{docker,nginx,monitoring,deployment}/
+├── docs/               API.md, DATABASE.md, WORKER.md, DEPLOYMENT.md, SECURITY.md, TESTING.md (§66)
+├── docker-compose.yml
+├── .env.example
+├── ARCHITECTURE.md · PROGRESS.md · design.md · README.md
+```
+
+**Proposed:** add `packages/shared-ui/` later only if the admin and user apps end up duplicating significant UI code. Until then the two apps stay fully separate (§68: "Admin and User applications are separated").
+
+---
+
+## DS-02 Planes & core pipeline
+
+**Status:** Baseline
+
+| Plane | Responsibility | Components |
+|---|---|---|
+| **Control** | Users, campaigns, provider config, worker registration, assignments, quotas, policies, reporting, admin | Admin/User web, Backend API, PostgreSQL |
+| **Data** | Fetch/claim jobs, process batches, send, retry, report results | Scheduler, Redis queue, Workers |
+| **Event** | Ingest delivery events, update state, feed reports | Event receiver, validator, processor |
+
+Core pipeline (§1):
+`Campaign → Recipient Validation → Queue → Batch Creation → Worker Assignment → Provider/SMTP → Delivery → Event Processing → Reports`
+
+**Invariants (non-negotiable, from §3, §11, §67, §68):**
+1. No email is ever sent from an HTTP request handler. Sending happens only in workers.
+2. Every recipient passes a suppression check before sending.
+3. Provider limits are respected. The system never uses IP rotation or any other technique to evade provider limits or spam filtering.
+4. Each job is processed at most once successfully (idempotency).
+5. No job is silently lost. Every job ends in `completed` or `dead_letter`, or is recoverable.
+
+---
+
+## DS-03 Data model
+
+**Status:** Baseline tables from §25; columns marked `(+)` are **Proposed** additions that fill gaps.
+
+Conventions (Proposed): UUID primary keys (`uuid` v7 for time ordering) · `created_at`/`updated_at` `timestamptz` on every table · soft status columns use Postgres enums or `text` + CHECK · all FKs indexed.
+
+### Identity & access
+
+```sql
+users:        id, email (unique), username (unique), password_hash, status, role_id,
+              totp_secret_encrypted (+), created_at, updated_at, last_login_at
+roles:        id, name  -- SUPER_ADMIN | ADMIN | OPERATOR | USER | VIEWER
+permissions:  id, code  -- e.g. campaigns.start
+role_permissions (+): role_id, permission_id
+user_limits:  id, user_id, daily_limit (+), hourly_limit (+), per_second_limit (+),
+              max_batch_size (+), max_recipients_per_campaign (+), updated_by (+), updated_at
+subscriptions: id, user_id, plan, status, period_start, period_end   -- (+) columns; purpose TBD (OQ-13)
+```
+
+`users.status`: `active | suspended | disabled` (Proposed).
+
+### Campaigns
+
+```sql
+campaigns:    id, user_id, name, subject, from_name, from_email, status,
+              total_recipients, processed, delivered, failed, bounced, batch_size,
+              created_at, started_at, completed_at,
+              created_by (+), provider_id (+), html_body (+), text_body (+),
+              reply_to (+), scheduled_at (+), paused_at (+), cancelled_at (+),
+              complained (+), deferred (+), skipped_suppressed (+)
+campaign_recipients: id, campaign_id, email, email_normalized (+), variables jsonb (+),
+              status (+), last_event_at (+)
+              UNIQUE(campaign_id, email_normalized)
+campaign_batches: id, campaign_id, sequence_no (+), recipient_count (+),
+              first_recipient_id (+), last_recipient_id (+), status (+)
+```
+
+Content fields (`html_body`, `text_body`) are missing from the spec (OQ-03). Counters on `campaigns` are denormalised and **eventually consistent**; `email_events` is the source of truth (§68).
+
+### Providers
+
+```sql
+providers:    id, provider_name, type (+ smtp|api), host, port, username, from_email, from_name,
+              hourly_limit, daily_limit, per_second_limit, status, health_score,
+              tls_mode (+), created_at, updated_at
+provider_credentials: id, provider_id, encrypted_secret, key_version (+), rotated_at (+)
+provider_assignments: id, user_id, provider_id, status, assigned_at, assigned_by
+              -- spec §16 calls this smtp_assignments; use provider_assignments (§25)
+provider_health_logs: id, provider_id, window_start, attempts, successes, auth_failures,
+              timeouts, deferrals, bounces, complaints, health_score, created_at
+```
+
+### Workers & jobs
+
+```sql
+workers:      id, worker_id (unique slug e.g. worker-001), name, version, capacity,
+              status, credential_hash (+), last_heartbeat_at (+), disabled (+), created_at
+worker_heartbeats: id, worker_id, status, cpu, memory, active_jobs, current_rate, timestamp
+jobs:         id, campaign_id, worker_id, provider_id, status, batch_size, attempts,
+              available_at, started_at, completed_at, created_at,
+              user_id (+), batch_id (+), idempotency_key (+ unique),
+              lease_expires_at (+), max_attempts (+), last_error (+)
+job_attempts: id, job_id, attempt_no, worker_id, started_at, finished_at, outcome, error_code, error_message
+email_events: id, campaign_id, job_id, recipient_id, provider_id, event_type,
+              provider_message_id, error_code, error_message, created_at
+```
+
+`user_id` on `jobs` appears in the §12 example but not in the §28 table. `batch_id`, `idempotency_key`, and `lease_expires_at` are required by §31 and §47 (see OQ-04, OQ-09).
+
+### Compliance & system
+
+```sql
+suppression_list: id, scope_user_id (+ nullable = global), email_normalized, type, reason (+),
+              source_event_id (+), created_by (+), created_at
+              UNIQUE(scope_user_id, email_normalized)
+              type ∈ unsubscribe | hard_bounce | complaint | invalid | admin_blocked
+audit_logs:   id, admin_id, action, resource, resource_id, old_value jsonb, new_value jsonb,
+              ip, user_agent, timestamp
+system_settings: key, value jsonb, updated_by, updated_at
+```
+
+### Indexes (baseline §28, plus proposed)
+
+```sql
+CREATE INDEX idx_jobs_status          ON jobs(status);
+CREATE INDEX idx_jobs_available_at    ON jobs(available_at);
+CREATE INDEX idx_campaign_user        ON campaigns(user_id);
+-- Proposed
+CREATE INDEX idx_jobs_claimable       ON jobs(status, available_at) WHERE status IN ('pending','retry');
+CREATE INDEX idx_jobs_lease           ON jobs(lease_expires_at) WHERE status IN ('claimed','processing');
+CREATE INDEX idx_events_campaign_time ON email_events(campaign_id, created_at);
+CREATE INDEX idx_suppression_lookup   ON suppression_list(email_normalized);
+```
+
+**Partitioning (Phase 3, §57):** range-partition `email_events`, `provider_health_logs`, `worker_heartbeats`, and `audit_logs` by month on their timestamp column.
+
+---
+
+## DS-04 Campaign state machine
+
+**Status:** Baseline (§50). Transition guards are Proposed.
+
+```text
+DRAFT ──> READY ──> QUEUED ──> PROCESSING ──> COMPLETED
+                                  │  ▲
+                                  ▼  │
+                                PAUSED
+PROCESSING ──> FAILED
+PROCESSING | PAUSED | QUEUED ──> CANCELLED   (admin; user may cancel own, TBD)
+```
+
+| From → To | Trigger | Guard (Proposed) |
+|---|---|---|
+| DRAFT → READY | content + recipients validated | ≥1 non-suppressed recipient; from_email allowed for provider; provider assigned & ACTIVE |
+| READY → QUEUED | user presses **Start** | quota available; batch_size ≤ limits |
+| QUEUED → PROCESSING | first job claimed | — |
+| PROCESSING → PAUSED | Pause | unclaimed jobs held; in-flight jobs finish |
+| PAUSED → PROCESSING | Resume | re-check quota and provider state |
+| PROCESSING → COMPLETED | all jobs `completed` or `dead_letter` | — |
+| PROCESSING → FAILED | failure threshold hit / provider disabled with no fallback | configurable |
+| * → CANCELLED | Stop | pending jobs → `cancelled`; audit logged |
+
+The Admin Panel menu (§6: Pending / Processing / Completed / Failed) is a **filtered view** over these states: Pending = DRAFT + READY + QUEUED (OQ-08).
+
+---
+
+## DS-05 Queue, jobs, scheduling, retry & events
+
+**Status:** Baseline + Proposed.
+
+### Job creation (§11–§14)
+`POST /campaigns/{id}/start` only changes state and enqueues a **"build batches"** task. A background builder then streams recipients in chunks of 10,000 (§14): validate → suppression check → split into `campaign_batches` of `batch_size` → insert one `jobs` row per batch → push the job id to Redis.
+
+Effective batch size = `min(user choice, user_limits.max_batch_size, provider policy, campaign policy)` (§13).
+
+### Job state machine (§12, §31, §47)
+
+```text
+pending ──claim──> claimed ──start──> processing ──ok──> completed
+   ▲                  │                    │
+   │           lease expired          transient failure
+   │                  ▼                    ▼
+   └──────────────── retry <────────── failed ──attempts ≥ max──> dead_letter
+                                                  (permanent failure → dead_letter directly)
+pending | retry ──> cancelled   (campaign cancelled)
+```
+
+### Atomic claim & idempotency: see ADR-010
+- Claim uses Postgres `UPDATE … WHERE id = (SELECT … FOR UPDATE SKIP LOCKED LIMIT 1) RETURNING *`, setting `worker_id`, `status='claimed'`, and `lease_expires_at = now() + lease`.
+- The worker must renew its lease while processing. An expired lease makes the job recoverable (§47).
+- `ack` and `failure` calls must present the `attempt_id`. Calls for stale attempts are rejected.
+- Per-recipient idempotency key: `sha256(campaign_id:recipient_id)`. It is stored before send, so a retry skips recipients that already have a `sent` event.
+
+### Redis keys (§30)
+
+```text
+queue:email            ready job ids (list/stream)
+queue:retry            zset scored by available_at
+queue:dead             dead-letter ids
+rate:user:{id}         token bucket
+rate:provider:{id}     token bucket (per-second / hourly / daily)
+worker:{id}:heartbeat  TTL key
+lock:*                 distributed locks
+stats:campaign:{id}    live counters for dashboards
+```
+
+Redis is an **accelerator**; job state of record lives in Postgres (ADR-002), so losing Redis loses no job (§47).
+
+### Retry (§22, ADR-008)
+Default schedule: `30s, 1m, 2m, 5m, 10m`. Max attempts and the schedule are configurable in `system_settings`. SMTP `4xx` and timeouts are transient; `5xx` is permanent (for example, `550` hard bounce leads to suppression).
+
+### Scheduler (§21, §60)
+The scheduler handles delayed campaign starts, promotion of due retries, lease recovery, quota enforcement, and capacity-aware dispatch. New work goes to the worker with the most free capacity (`capacity − current_rate`), without ever exceeding provider or user limits. It runs in-process in the backend for the MVP and becomes a dedicated service in Phase 3.
+
+### Delivery events (§23, §61)
+`Provider event → Receiver (webhook/DSN) → Validator (signature, schema, dedupe on provider_message_id+type) → Processor → email_events + counters + suppression`.
+
+Statuses: `queued, processing, sent, delivered, deferred, bounced, failed, complained, unsubscribed`.
+
+Domain events (internal bus, Proposed Redis Streams): `CampaignCreated, JobCreated, JobClaimed, JobCompleted, EmailSent, EmailDelivered, EmailBounced, EmailComplained, WorkerOnline, WorkerOffline, ProviderDisabled`.
+
+---
+
+## DS-06 Providers
+
+**Status:** Baseline + Proposed.
+
+### Provider abstraction (ADR-007)
+
+```python
+class EmailProvider(Protocol):
+    async def connect(self) -> None: ...
+    async def send(self, message: OutboundMessage) -> SendResult: ...   # provider_message_id | error(code, transient)
+    async def test(self) -> HealthCheckResult: ...                       # auth + connection + optional test send
+    async def close(self) -> None: ...
+```
+
+The first implementation is `SmtpProvider` (aiosmtplib, STARTTLS/TLS). API-based providers are added later behind the same interface.
+
+### Assignment (§16)
+Admin assigns providers to users. A user can select only providers with an **active assignment** that are in state `ACTIVE` or `WARNING`.
+
+### State machine & health (§17–§18)
+
+```text
+ACTIVE ⇄ WARNING ⇄ DEGRADED ──> DISABLED (auto at threshold, or manual)
+DISABLED ──> ACTIVE (manual re-enable only; audit logged)
+```
+
+Proposed scoring: `health_score` (0–100) is computed over rolling windows (5 min and 1 h) from failure rate, auth/connection failures, timeouts, deferrals, bounce rate, and complaint rate. The formula is TBD (OQ-07).
+
+| Score | State (Proposed) | Scheduling effect |
+|---|---|---|
+| ≥ 80 | ACTIVE | normal |
+| 50–79 | WARNING | normal; alert admin |
+| 20–49 | DEGRADED | throttle to 50% of limits; alert |
+| < 20 for N consecutive windows | DISABLED | no new jobs; alert |
+
+Never disable on a single failure (§18). Admin actions: Enable, Disable, Assign, Unassign, Test, Inspect. All are audit logged.
+
+### Sender authentication (§3)
+Provider setup shows SPF/DKIM/DMARC status for the from-domain (DNS lookup). Missing records trigger a warning.
+
+---
+
+## DS-07 Recipients & suppression
+
+**Status:** Baseline + Proposed.
+
+### Upload & processing (§55–§56)
+- **MVP:** CSV upload to the API with streaming parse and a size cap.
+- **Phase 3:** presigned URL → object storage (S3/R2/MinIO) → validation worker.
+- Pipeline: `validate file → parse (streamed) → normalize (trim, lowercase domain) → syntax check → deduplicate → suppression check → persist campaign_recipients → build batches`.
+- Never hold a whole file in memory. Process in chunks of 10,000.
+
+### Consent (§3)
+Uploading a list requires the user to confirm the recipients opted in. The confirmation is stored with a timestamp on the campaign (Proposed).
+
+### Suppression (§24)
+- Types: `unsubscribe, hard_bounce, complaint, invalid, admin_blocked`.
+- Checked twice: at batch build **and** by the worker just before send (catches suppressions added mid-campaign).
+- Automatic inserts: hard bounce → `hard_bounce`; complaint/FBL → `complaint`; unsubscribe link → `unsubscribe`.
+- Scope (global vs per-user) is unresolved (OQ-05). Proposed: `hard_bounce`, `complaint`, and `admin_blocked` are global; `unsubscribe` is per sending user.
+
+### Unsubscribe (Proposed)
+Every message carries `List-Unsubscribe` (mailto + https) and `List-Unsubscribe-Post: List-Unsubscribe=One-Click`, plus a footer link. The link token is HMAC-signed `(campaign_id, recipient_id)`, so no login is needed.
+
+---
+
+## DS-08 Worker
+
+**Status:** Baseline + Proposed.
+
+**Lifecycle (§8):** `START → load config → authenticate → register → heartbeat loop → fetch → claim → process batch → send → report → next`.
+
+- **Identity (§9):** `worker_id`, `name`, `version`, `capacity` (msgs/sec). A credential is issued at provisioning and supplied through env or a secret file, never hard-coded. It is exchanged for a short-lived access token (DS-10).
+- **Heartbeat (§10):** every 10 s (Proposed) carrying `cpu, memory, active_jobs, current_rate, status`. The server marks the worker **WARNING** after 30 s without a heartbeat and **OFFLINE** after 90 s (Proposed, configurable; OQ-06). Leases of OFFLINE workers are expired so their jobs can be reclaimed.
+- **Concurrency:** asyncio. There is one sender task pool per claimed job, bounded by `capacity` and the provider's `per_second_limit` (token bucket in Redis `rate:provider:{id}`, shared across workers).
+- **Graceful shutdown:** on SIGTERM the worker stops claiming new jobs, finishes or releases in-flight jobs, and sends a final heartbeat with `status=offline`.
+- **Network:** outbound only; no inbound public ports (§39).
+- **Scaling (§41):** stateless; queue depth drives replica count (thresholds to be benchmarked).
+
+---
+
+## DS-09 API
+
+**Status:** Baseline + Proposed.
+
+Conventions: versioned under `/api/v1/` (§53) · JSON · cursor pagination `?limit=50&cursor=…` with max limit 200 (§54) · errors as `{ "error": { "code", "message", "details" } }` · request size limits · input validation with Pydantic · every mutating admin call is audit logged.
+
+| Surface | Endpoints (baseline §33) | Key operations (Proposed) |
+|---|---|---|
+| Admin | `/admin/users` | list, create, get, update, suspend, activate, set limits |
+| | `/admin/campaigns` | list/filter by state, create, assign to user, pause, resume, cancel |
+| | `/admin/providers` | CRUD, enable, disable, test, assign/unassign, health history |
+| | `/admin/workers` | list, get, disable, rotate credential, heartbeat history |
+| | `/admin/queues` | depth by state, list failed/retry/dead, requeue dead-letter |
+| | `/admin/reports` | delivery, bounce, complaint, per-user |
+| | `/admin/settings` | get/update system settings, API keys, audit logs |
+| User | `/user/profile` | get/update own profile, change password, 2FA |
+| | `/user/campaigns` | list own/assigned, get, update draft, upload recipients, start/pause/stop, live stats |
+| | `/user/providers` | list assigned providers |
+| | `/user/jobs` | list jobs for own campaigns |
+| | `/user/reports` | own campaign reports |
+| Worker | `/worker/register`, `/worker/heartbeat`, `/worker/jobs/claim`, `/worker/jobs/{id}/ack`, `/worker/jobs/{id}/failure`, `/worker/health` | plus `/worker/jobs/{id}/lease` (renew) and `/worker/token` (credential exchange) |
+| Public (+) | `/u/{token}` (unsubscribe), `/hooks/providers/{provider_id}` (delivery events) | signed and rate-limited |
+
+The full request/response schemas will be written to `docs/API.md` once endpoints are implemented. FastAPI's OpenAPI output is the canonical contract.
+
+---
+
+## DS-10 Authentication & authorization
+
+**Status:** Baseline (§32, §49). Mechanism is Proposed (ADR-005).
+
+| Actor | Factors | Token |
+|---|---|---|
+| Admin | email + password + **TOTP 2FA (mandatory)** | access JWT (15 min) + rotating refresh (httpOnly cookie) |
+| User | email/username + password, optional 2FA | same |
+| Worker | worker_id + provisioned credential | short-lived access JWT (≤ 15 min), `aud=worker` |
+
+- Passwords: Argon2id.
+- Worker tokens can never be used on admin or user routes (separate audience), and vice versa.
+- **Roles:** `SUPER_ADMIN, ADMIN, OPERATOR, USER, VIEWER`.
+- **Permissions:** `users.read/write, campaigns.read/write/start/stop, providers.read/write, workers.read/write, reports.read, settings.write`.
+
+Proposed role → permission matrix (to confirm):
+
+| Permission | SUPER_ADMIN | ADMIN | OPERATOR | USER | VIEWER |
+|---|---|---|---|---|---|
+| users.read | ✓ | ✓ | ✓ | – | ✓ |
+| users.write | ✓ | ✓ | – | – | – |
+| campaigns.read | ✓ | ✓ | ✓ | own | ✓ |
+| campaigns.write | ✓ | ✓ | ✓ | own | – |
+| campaigns.start / stop | ✓ | ✓ | ✓ | own | – |
+| providers.read | ✓ | ✓ | ✓ | assigned | ✓ |
+| providers.write | ✓ | ✓ | – | – | – |
+| workers.read | ✓ | ✓ | ✓ | – | ✓ |
+| workers.write | ✓ | ✓ | – | – | – |
+| reports.read | ✓ | ✓ | ✓ | own | ✓ |
+| settings.write | ✓ | – | – | – | – |
+
+---
+
+## DS-11 Security, secrets & audit
+
+**Status:** Baseline.
+
+- TLS everywhere. Secure headers, strict CORS (admin and user origins only), and CSRF protection for cookie-based refresh.
+- **Secrets at rest (ADR-006):** envelope encryption, AES-256-GCM, with a key version stored alongside each secret so keys can rotate. `ENCRYPTION_KEY` comes from a secret manager in production.
+- Never expose DB, SMTP, or Redis credentials, JWT secrets, or encryption keys to frontends (§34). Provider secrets are **write-only** in the API (never returned).
+- **Audit log (§45):** `admin_id, action, resource, resource_id, old_value, new_value, ip, user_agent, timestamp`. Actions include `USER_SUSPENDED, SMTP_DISABLED, CAMPAIGN_CREATED, PROVIDER_ASSIGNED, WORKER_DISABLED, LIMIT_CHANGED`, among others. The table is append-only (no UPDATE/DELETE grant for the app role).
+- Least-privilege DB roles: separate roles for the API and for migrations.
+
+---
+
+## DS-12 Admin Panel UI
+
+**Status:** Baseline (§6, §42). Visual design is Proposed.
+
+**Navigation**
+
+```text
+Dashboard
+Users       → All · Active · Suspended · Limits
+Campaigns   → All · Pending · Processing · Completed · Failed
+Providers   → SMTP/Email Providers · Assignments · Health · Disabled
+Workers     → Nodes · Online · Offline · Capacity · Health
+Queues      → Pending · Processing · Failed · Retry (+ Dead-letter)
+Reports     → Delivery · Bounce · Complaint · User Reports
+System      → Settings · API Keys · Audit Logs · Security
+```
+
+**Dashboard (real-time, §42):** tiles for Active Workers, Online Providers, Queue Depth, and Emails/sec; counters for Processed, Delivered, Failed, Bounced, Deferred, and Complaints; worker CPU/memory; a provider health list. Updates arrive over SSE (ADR-009).
+
+**UI system (Proposed):** shadcn/ui on Tailwind; left sidebar with top bar; data tables with server-side cursor pagination and filters; status badges with one colour per state (ACTIVE/ONLINE/COMPLETED = green, WARNING/PAUSED = amber, DEGRADED/FAILED/OFFLINE = red, DISABLED/CANCELLED = grey); light and dark themes; destructive actions need a confirm dialog and are audit logged.
+
+---
+
+## DS-13 User Panel UI
+
+**Status:** Baseline (§7, §51). The panel must stay **intentionally simple**.
+
+**Flow:** `Login → Dashboard → Assigned Campaign → Select Provider → Select Batch Size → Review → Start → Live Result → Report`.
+
+Screens:
+1. **Dashboard**: today's Assigned / Processed / Delivered / Failed / Remaining, current speed (msgs/sec), and a **Start Sending** button.
+2. **Campaign**: name, subject, from name, from email, recipient file, batch size (500 / 1000 / 5000, capped by limits; OQ-10), provider dropdown (assigned + ACTIVE only), **Start**.
+3. **Review** (Proposed, from §51): summary of recipients after dedupe and suppression, estimated duration at current limits, consent confirmation checkbox.
+4. **Sending Monitor**: progress bar with %, Processed / Delivered / Failed / Remaining, speed, **Pause** and **Stop** (Stop requires confirmation).
+5. **Report**: final counts, bounce/complaint breakdown, CSV export.
+
+---
+
+## DS-14 Infrastructure & deployment
+
+**Status:** Baseline.
+
+- **Local/dev:** `docker-compose.yml` with services `backend, admin, user, worker, postgres, redis, nginx`. Workers are scaled independently (`docker compose up --scale worker=N`).
+- **Environment (§35):** `APP_ENV, DATABASE_URL, REDIS_URL, JWT_SECRET, ENCRYPTION_KEY, ADMIN_API_URL, WORKER_API_URL, QUEUE_NAME, LOG_LEVEL`. Proposed additions: `CORS_ORIGINS, OBJECT_STORAGE_*, WORKER_ID, WORKER_CREDENTIAL, PUBLIC_BASE_URL`.
+- **Production topology (§65):** `Internet → Cloudflare → Nginx → {Admin Web, User Web} → API cluster → PostgreSQL + Redis → Queue → Worker-01..N → Email Providers`.
+- **Scaling path (§40):**
+  1. 1 API · 1 PG · 1 Redis · 1 worker
+  2. 2 API · 1 PG · Redis HA · 5 workers
+  3. API cluster · DB HA · Redis HA · worker cluster · dedicated event processor and scheduler · monitoring cluster
+- **DR (§46):** daily full backup plus PITR for Postgres; Redis persistence (AOF); config, secret, and infrastructure backups. Restores are tested periodically.
+
+---
+
+## DS-15 Observability, metrics & testing
+
+**Status:** Baseline.
+
+- **Logs:** structured JSON with fields `timestamp, service, worker_id, job_id, event, duration_ms` (§43).
+- **Metrics (§44):**
+  - `jobs_created_total, jobs_completed_total, jobs_failed_total`
+  - `emails_{processed,delivered,bounced,failed}_total`
+  - `provider_errors_total, provider_latency`
+  - `worker_cpu, worker_memory, queue_depth, queue_latency`
+  - `sending_rate, delivery_rate, bounce_rate, complaint_rate`
+- **Stack:** Prometheus, Grafana, Loki, OpenTelemetry (simplified for the first release).
+- **Tests (§63):**
+  - Unit: auth, campaign service, batch generator, retry logic, provider health, suppression.
+  - Integration: API↔DB, API↔Queue, Worker↔Queue, Worker↔Provider (using a local SMTP sink such as Mailpit), Event↔DB.
+  - Load: 10k jobs; 100k, 500k, and 1M recipients. Measure throughput, latency, queue delay, CPU, memory, DB/Redis load, and provider response.
+- **Performance target (§20, §64):** 1,500,000/hour ≈ **416.67 msg/sec** average. This is a *capacity-planning target derived from configuration* (provider limits → user limits → worker capacity → scheduler), never hard-coded. Example: 6 workers × 80/sec = 480/sec theoretical.
+
+---
+
+## Architecture Decision Records (ADRs)
+
+Format: **Context → Decision → Consequences**. Status: Proposed / Accepted / Superseded.
+
+### ADR-001: Backend stack: Python, FastAPI, SQLAlchemy 2.x, Alembic, Pydantic v2
+- **Status:** Accepted (baseline §37)
+- **Context:** The spec recommends this stack. The worker is also Python/asyncio, so the two can share code.
+- **Decision:** Use the stack as specified; async SQLAlchemy with asyncpg.
+- **Consequences:** One language for backend and worker; Pydantic schemas can be shared between API and worker.
+
+### ADR-002: PostgreSQL is the job system of record; Redis is the fast path
+- **Status:** Proposed
+- **Context:** §47 requires that no job be silently lost when Redis fails. Redis lists alone are not durable enough.
+- **Decision:** Every job exists as a row in `jobs`. Redis holds job ids and dispatch hints, rate limits, locks, and live stats. Redis can be rebuilt from Postgres at any time (`status IN (pending, retry)`).
+- **Consequences:** Queue recovery is a DB query. Claims touch Postgres, which is fine at batch granularity (416 msg/s ÷ 1000 per batch ≈ 0.4 claims/s). RabbitMQ or Kafka can be re-evaluated in Phase 4.
+
+### ADR-003: Monorepo
+- **Status:** Accepted (baseline §36)
+- **Decision:** Keep `admin-web`, `user-web`, `backend`, `worker`, and `infrastructure` in one repository with per-package tooling.
+
+### ADR-004: Workers claim jobs through the Worker API, not directly from Postgres
+- **Status:** Proposed
+- **Context:** Workers run on remote VPSs (§8). Giving them DB credentials widens the blast radius.
+- **Decision:** Workers talk to the Worker API for register, heartbeat, claim, lease, ack, and failure. They use Redis only for shared rate-limit buckets, reached with a restricted ACL user; this is revisited if Redis is not reachable from worker networks.
+- **Consequences:** Worker credentials stay isolated (§68). The API becomes a dependency of the data plane, so it must be horizontally scaled.
+
+### ADR-005: JWT access tokens + rotating refresh tokens; TOTP for admins
+- **Status:** Proposed
+- **Decision:** 15-minute access JWT; refresh token in an httpOnly Secure SameSite=Strict cookie, rotated on use and revocable (stored hashed). TOTP 2FA is mandatory for admin roles. Workers get a separate audience and signing key.
+
+### ADR-006: Envelope encryption for secrets
+- **Status:** Proposed
+- **Decision:** AES-256-GCM per secret with a random nonce. The data key comes from `ENCRYPTION_KEY` (dev) or a KMS / secret manager (prod). `key_version` is stored per secret to support rotation.
+
+### ADR-007: Provider abstraction with SMTP as the first adapter
+- **Status:** Proposed
+- **Decision:** Define the `EmailProvider` protocol (DS-06). Implement `SmtpProvider` first and add API-based adapters later without touching the scheduler or worker loop.
+
+### ADR-008: Retry classification & schedule
+- **Status:** Proposed
+- **Decision:**
+  - SMTP 4xx, timeouts, and connection errors are transient: retry on the schedule `30s, 1m, 2m, 5m, 10m`.
+  - SMTP 5xx is permanent: no retry. A 5.1.x bounce also creates a `hard_bounce` suppression.
+  - Max attempts defaults to 5, configurable.
+  - Retries happen **per recipient** inside a job. A job fails as a whole only on systemic errors (auth or connection).
+- **Consequences:** The spec's example schedule is not strictly exponential. It is kept as configurable data, not a formula.
+
+### ADR-009: Server-Sent Events for real-time dashboards
+- **Status:** Proposed
+- **Decision:** Use SSE; updates are one-way, work over plain HTTP/Nginx, and are simpler than WebSockets. Clients fall back to polling. The server pushes aggregated stats from Redis `stats:*` at 1–2 s intervals.
+
+### ADR-010: Lease-based atomic job claiming
+- **Status:** Proposed
+- **Decision:** Claim with `SELECT … FOR UPDATE SKIP LOCKED` and set `lease_expires_at`. Workers renew the lease every `lease/3`. The scheduler returns expired leases to `retry`. Each claim creates a `job_attempts` row, and ack/failure must reference the current attempt.
+- **Consequences:** Only one worker can own a job (§31), and crashed workers' jobs are recovered automatically (§47).
+
+---
+
+## Open questions
+
+Resolve these before implementing the affected areas. Record the answer, the date, and who decided.
+
+| ID | Question | Affects | Proposed answer | Status |
+|---|---|---|---|---|
+| OQ-01 | What is the tenancy model? Is each *user* a tenant, or is there an organisation/account above users? §2 says "multi-tenant" but no tenant table exists. | DS-03, all queries | Start with user = tenant; add `organizations` later if needed | Open |
+| OQ-02 | Who creates campaigns? §1 says users *receive assigned* campaigns, but §7 lets users enter name, subject, and file. What does `campaigns.user_id` mean: owner or assignee? | DS-04, DS-09, DS-13 | Admin *or* user can create; `user_id` = the user who sends; `created_by` = creator | Open |
+| OQ-03 | Where is the email content? `campaigns` has no body/template fields. Is personalisation (merge variables) needed? | DS-03, worker | Add `html_body`, `text_body`, and simple `{{var}}` merge from `campaign_recipients.variables` | Open |
+| OQ-04 | How do jobs map to recipients? `jobs` has no batch reference, even though `campaign_batches` exists. | DS-03, DS-05 | Add `jobs.batch_id`; one job per batch | Open |
+| OQ-05 | Is suppression global or per user? | DS-07 | Bounce/complaint/admin_blocked global; unsubscribe per user | Open |
+| OQ-06 | What are the heartbeat interval and the WARNING/OFFLINE thresholds? | DS-08 | 10 s / 30 s / 90 s, configurable | Open |
+| OQ-07 | What is the provider health formula, and where are the state thresholds (DEGRADED has no example)? | DS-06 | See DS-06 table; tune after load tests | Open |
+| OQ-08 | The admin menu campaign states (Pending/Processing/Completed/Failed) differ from the §50 state machine. | DS-04, DS-12 | Menu = filtered views over the state machine | Open |
+| OQ-09 | Job status vocabulary and the missing columns (`attempt_id`, `idempotency_key`, lease) required by §31/§47. | DS-03, DS-05 | Adopt DS-05 state machine + ADR-010 columns | Open |
+| OQ-10 | Is batch size limited to fixed options (500/1000/5000) or free input within limits? | DS-13 | Presets + custom, capped by limits | Open |
+| OQ-11 | If a user has several assigned providers, is one chosen per campaign, or can load be spread across them? | DS-05, DS-06 | One provider per campaign (MVP). Any later spreading must respect each provider's own limits and policies, never evade them | Open |
+| OQ-12 | How are bounce and complaint events received per provider (webhooks, DSN mailbox, FBL)? | DS-05, DS-07 | Webhooks for API providers; DSN mailbox parsing for raw SMTP (Phase 2) | Open |
+| OQ-13 | What does "Assigned 100,000 / Today's Sending" mean (daily quota vs assigned campaign volume)? What is `subscriptions` for? | DS-03, DS-13 | Daily quota from `user_limits.daily_limit`; `subscriptions` = billing plan (defer) | Open |
+| OQ-14 | What retention and deletion policy applies to recipient PII and `email_events` (GDPR, erasure requests)? | DS-03, DS-11 | Configurable retention (e.g. 13 months events); erasure keeps a hashed suppression entry | Open |
+| OQ-15 | `ARCHITECTURE.md` skips §19 and §59. Was content lost? | all | Ask the document author | Open |
+
+---
+
+## Design changelog
+
+Newest first.
+
+- **2026-09-29 · v0.1.0**: Initial design document extracted from `ARCHITECTURE.md`. Added DS-01…DS-15, proposed ADR-001…ADR-010, and logged OQ-01…OQ-15.
