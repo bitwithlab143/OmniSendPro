@@ -1,0 +1,20 @@
+{
+  "name": "omnisendpro",
+  "private": true,
+  "workspaces": [
+    "packages/*",
+    "admin-web",
+    "user-web"
+  ],
+  "scripts": {
+    "dev:admin": "npm run dev -w admin-web",
+    "dev:user": "npm run dev -w user-web",
+    "build": "npm run build -w admin-web && npm run build -w user-web",
+    "typecheck": "npm run typecheck --workspaces --if-present",
+    "test": "npm run test --workspaces --if-present",
+    "lint": "npm run typecheck"
+  },
+  "engines": {
+    "node": ">=20"
+  }
+}

@@ -10,7 +10,7 @@ import uuid
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
-from sqlalchemy import and_, func, select
+from sqlalchemy import and_, func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models import Campaign, CampaignRecipient, EmailEvent, Job, Provider, User, Worker
@@ -93,16 +93,19 @@ async def admin_dashboard(db: AsyncSession) -> dict[str, Any]:
 
 async def user_dashboard(db: AsyncSession, user: User) -> dict[str, Any]:
     today = await event_counts(db, start_of_day(), user_id=user.id)
-    active = (
+    running = [CampaignStatus.QUEUED, CampaignStatus.PROCESSING, CampaignStatus.PAUSED]
+    # "Today's sending" (§7): campaigns still running plus everything started today.
+    todays = (
         await db.execute(
             select(Campaign).where(
                 Campaign.user_id == user.id,
-                Campaign.status.in_([CampaignStatus.QUEUED, CampaignStatus.PROCESSING, CampaignStatus.PAUSED]),
+                or_(Campaign.status.in_(running), Campaign.started_at >= start_of_day()),
             )
         )
     ).scalars().all()
-    assigned = sum(c.total_recipients for c in active)
-    processed = sum(c.sent + c.failed + c.bounced + c.skipped_suppressed for c in active)
+    active = [c for c in todays if c.status in running]
+    assigned = sum(c.total_recipients for c in todays)
+    processed = sum(c.sent + c.failed + c.bounced + c.skipped_suppressed for c in todays)
     limits = user.limits
     usage = await quotas.usage(user_id=user.id)
     rate = 0.0
@@ -113,8 +116,8 @@ async def user_dashboard(db: AsyncSession, user: User) -> dict[str, Any]:
         "active_campaigns": len(active),
         "assigned": assigned,
         "processed": processed,
-        "delivered": sum(c.delivered for c in active),
-        "failed": sum(c.failed + c.bounced for c in active),
+        "delivered": sum(c.delivered for c in todays),
+        "failed": sum(c.failed + c.bounced for c in todays),
         "remaining": max(0, assigned - processed),
         "current_speed": round(rate, 2),
         "quota": {
