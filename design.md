@@ -675,7 +675,9 @@ Graceful shutdown: SIGTERM stops claiming, finishes the current batch, and relea
   `Authorization` header). `useLiveQuery` in `web-shared` writes each update into the TanStack Query cache.
   If the stream fails it falls back to polling, then retries the stream with backoff. API keys may use the
   user streams too.
-- nginx: buffering is disabled by the response header; `proxy_read_timeout` ≥ 330 s on `/api/`.
+- nginx: buffering is disabled by the `X-Accel-Buffering: no` response header. The 15 s pings keep the
+  stream inside the existing 120 s `proxy_read_timeout`. The request's DB session is released before
+  streaming starts, so an open stream holds no database connection between ticks.
 
 ---
 

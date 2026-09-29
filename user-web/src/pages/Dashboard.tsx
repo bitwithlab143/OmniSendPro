@@ -14,6 +14,7 @@ import {
   fmtRate,
   useAuth,
   type Page,
+  useLiveQuery,
 } from "@omnisend/web-shared";
 import { useQuery } from "@tanstack/react-query";
 import { Gauge, Plus, Send } from "lucide-react";
@@ -36,7 +37,7 @@ interface Dashboard {
 
 export function DashboardPage() {
   const { user } = useAuth();
-  const q = useQuery({ queryKey: ["dashboard"], queryFn: () => api.get<Dashboard>("/user/dashboard"), refetchInterval: 3000 });
+  const q = useLiveQuery({ api, queryKey: ["dashboard"], queryFn: () => api.get<Dashboard>("/user/dashboard"), streamPath: "/user/dashboard/stream", pollMs: 3000 });
   const active = useQuery({
     queryKey: ["campaigns", "processing"],
     queryFn: () => api.get<Page<Campaign>>("/user/campaigns", { view: "processing", limit: 5 }),

@@ -33,6 +33,7 @@ import {
   usePaged,
   useToast,
   type Page,
+  useLiveQuery,
 } from "@omnisend/web-shared";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { ArrowLeft, Download, Pause, Pencil, Play, Upload, XCircle } from "lucide-react";
@@ -62,7 +63,14 @@ export function CampaignDetailPage() {
 
   const q = useQuery({ queryKey: ["campaigns", id], queryFn: () => api.get<Campaign>(`/admin/campaigns/${id}`) });
   const running = !!q.data && RUNNING.includes(q.data.status);
-  const stats = useQuery({ queryKey: ["campaigns", id, "stats"], queryFn: () => api.get<CampaignStats>(`/admin/campaigns/${id}/stats`), refetchInterval: running ? 2000 : false, enabled: !!q.data });
+  const stats = useLiveQuery({
+    api,
+    queryKey: ["campaigns", id, "stats"],
+    queryFn: () => api.get<CampaignStats>(`/admin/campaigns/${id}/stats`),
+    streamPath: running ? `/admin/campaigns/${id}/stream` : null,
+    pollMs: running ? 2000 : false,
+    enabled: !!q.data,
+  });
   const report = useQuery({ queryKey: ["campaigns", id, "report"], queryFn: () => api.get<Report>(`/admin/campaigns/${id}/report`), refetchInterval: running ? 10_000 : false, enabled: !!q.data });
   const jobs = usePaged<Job>(["campaigns", id, "jobs"], (cursor) => api.get<Page<Job>>(`/admin/campaigns/${id}/jobs`, { cursor }), { refetchInterval: running ? 5000 : undefined });
   const qc = useQueryClient();

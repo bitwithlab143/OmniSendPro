@@ -28,6 +28,7 @@ import {
   usePaged,
   useToast,
   type Page,
+  useLiveQuery,
 } from "@omnisend/web-shared";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { ArrowLeft, Download, Pause, Play, Square } from "lucide-react";
@@ -52,10 +53,13 @@ export function CampaignMonitorPage() {
   const [recipientStatus, setRecipientStatus] = useState("");
   const campaign = useQuery({ queryKey: ["campaigns", id], queryFn: () => api.get<Campaign>(`/user/campaigns/${id}`) });
   const live = !!campaign.data && LIVE.includes(campaign.data.status);
-  const stats = useQuery({
+  const paused = campaign.data?.status === "PAUSED";
+  const stats = useLiveQuery({
+    api,
     queryKey: ["campaigns", id, "stats"],
     queryFn: () => api.get<CampaignStats>(`/user/campaigns/${id}/stats`),
-    refetchInterval: live ? 2000 : campaign.data?.status === "PAUSED" ? 5000 : false,
+    streamPath: live || paused ? `/user/campaigns/${id}/stream` : null,
+    pollMs: live ? 2000 : paused ? 5000 : false,
     enabled: !!campaign.data,
   });
   // Keep the campaign's own status in sync with the live stats.

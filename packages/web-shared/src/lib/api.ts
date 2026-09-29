@@ -34,6 +34,9 @@ export interface ApiClient {
   del<T>(path: string): Promise<T>;
   upload<T>(path: string, file: File, query?: Query): Promise<T>;
   download(path: string, filename: string): Promise<void>;
+  /** Server-Sent Events over fetch (EventSource cannot send the bearer token). Resolves when the server
+   * closes the stream; rejects on HTTP or network errors. */
+  stream(path: string, onEvent: (event: string, data: unknown) => void, signal: AbortSignal): Promise<void>;
   setToken(token: string | null): void;
   getToken(): string | null;
   refresh(): Promise<RefreshResult | null>;
@@ -85,6 +88,28 @@ async function parseError(res: Response): Promise<ApiError> {
   }
   if (res.status === 0 || res.status >= 502) message = "The server is unavailable. Please try again.";
   return new ApiError(res.status, code, message, details);
+}
+
+/** Split an SSE byte stream into (event, data) pairs. Exported for tests. */
+export function parseSseChunk(buffer: string): { events: { event: string; data: string }[]; rest: string } {
+  const events: { event: string; data: string }[] = [];
+  const normalized = buffer.replace(/\r\n/g, "\n");
+  const blocks = normalized.split("\n\n");
+  const rest = blocks.pop() ?? "";
+  for (const block of blocks) {
+    let event = "message";
+    const data: string[] = [];
+    for (const line of block.split("\n")) {
+      if (line.startsWith(":")) continue; // comment / keep-alive ping
+      const idx = line.indexOf(":");
+      const field = idx === -1 ? line : line.slice(0, idx);
+      const value = idx === -1 ? "" : line.slice(idx + 1).replace(/^ /, "");
+      if (field === "event") event = value;
+      else if (field === "data") data.push(value);
+    }
+    if (data.length) events.push({ event, data: data.join("\n") });
+  }
+  return { events, rest };
 }
 
 export function createApi(app: AppName): ApiClient {
@@ -169,6 +194,36 @@ export function createApi(app: AppName): ApiClient {
       a.download = filename;
       a.click();
       setTimeout(() => URL.revokeObjectURL(url), 1000);
+    },
+    async stream(path, onEvent, signal) {
+      const open = () =>
+        fetch(`${BASE}${path}`, {
+          headers: { Accept: "text/event-stream", ...(token ? { Authorization: `Bearer ${token}` } : {}) },
+          credentials: "include",
+          signal,
+        });
+      let res = await open();
+      if (res.status === 401 && (await refresh())) res = await open();
+      if (!res.ok || !res.body) throw await parseError(res);
+      const reader = res.body.getReader();
+      const decoder = new TextDecoder();
+      let buffer = "";
+      for (;;) {
+        const { value, done } = await reader.read();
+        if (done) return;
+        buffer += decoder.decode(value, { stream: true });
+        const parsed = parseSseChunk(buffer);
+        buffer = parsed.rest;
+        for (const e of parsed.events) {
+          let data: unknown = e.data;
+          try {
+            data = JSON.parse(e.data);
+          } catch {
+            /* plain text */
+          }
+          onEvent(e.event, data);
+        }
+      }
     },
     setToken: (t) => {
       token = t;

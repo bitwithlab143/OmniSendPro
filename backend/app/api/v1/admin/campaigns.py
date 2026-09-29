@@ -5,10 +5,11 @@ from __future__ import annotations
 import uuid
 from typing import Annotated, Literal
 
-from fastapi import APIRouter, Depends, File, Query, UploadFile
+from fastapi import APIRouter, Depends, File, Query, Request, UploadFile
 from fastapi.responses import StreamingResponse
 from sqlalchemy import select
 
+from app.api import sse
 from app.api.deps import DB, Ctx, Principal, require
 from app.api.v1 import campaign_common as common
 from app.core.errors import ApiError, not_found
@@ -134,6 +135,17 @@ async def cancel_campaign(campaign_id: uuid.UUID, db: DB, _: Stop, ctx: Ctx) -> 
 @router.get("/{campaign_id}/stats", response_model=CampaignStats)
 async def campaign_stats(campaign_id: uuid.UUID, db: DB, _: Read) -> CampaignStats:
     return await common.stats(db, await common.load(db, campaign_id))
+
+
+@router.get("/{campaign_id}/stream", response_class=StreamingResponse)
+async def campaign_stream(campaign_id: uuid.UUID, request: Request, db: DB, _: Read) -> StreamingResponse:
+    """Live campaign stats (SSE, design DS-20); ends once the campaign is final."""
+    await common.load(db, campaign_id)
+
+    async def produce(sdb):  # noqa: ANN001, ANN202
+        return await common.stats(sdb, await common.load(sdb, campaign_id))
+
+    return await sse.stream(request, db, produce, interval=1.0, done=sse.campaign_done)
 
 
 @router.get("/{campaign_id}/report")

@@ -16,3 +16,4 @@ export * from "./ui/login";
 export * from "./ui/pager";
 export * from "./lib/useAction";
 export * from "./ui/apiKeys";
+export * from "./lib/useLiveQuery";

@@ -6,9 +6,11 @@ import uuid
 from datetime import UTC, datetime, timedelta
 from typing import Annotated, Any, Literal
 
-from fastapi import APIRouter, Depends, Query
+from fastapi import APIRouter, Depends, Query, Request
+from fastapi.responses import StreamingResponse
 from sqlalchemy import delete, select
 
+from app.api import sse
 from app.api.deps import DB, Ctx, Principal, require
 from app.core.errors import bad_request, not_found
 from app.core.pagination import Page, like_escape, paginate
@@ -41,6 +43,12 @@ def _range(days: int, since: datetime | None, until: datetime | None) -> tuple[d
 @router.get("/dashboard")
 async def dashboard(db: DB, _: Reports) -> dict[str, Any]:
     return await reports.admin_dashboard(db)
+
+
+@router.get("/dashboard/stream", response_class=StreamingResponse)
+async def dashboard_stream(request: Request, db: DB, _: Reports) -> StreamingResponse:
+    """Live admin dashboard (SSE, design DS-20)."""
+    return await sse.stream(request, db, reports.admin_dashboard, interval=2.0)
 
 
 @router.get("/reports/summary")

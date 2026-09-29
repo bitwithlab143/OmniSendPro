@@ -18,6 +18,7 @@ import {
   fmtCompact,
   fmtRate,
   fmtRelative,
+  useLiveQuery,
 } from "@omnisend/web-shared";
 import { useQuery } from "@tanstack/react-query";
 import { Activity, Cpu, Layers, Server } from "lucide-react";
@@ -45,7 +46,7 @@ interface Summary {
 }
 
 export function DashboardPage() {
-  const q = useQuery({ queryKey: ["dashboard"], queryFn: () => api.get<Dashboard>("/admin/dashboard"), refetchInterval: 5000 });
+  const q = useLiveQuery({ api, queryKey: ["dashboard"], queryFn: () => api.get<Dashboard>("/admin/dashboard"), streamPath: "/admin/dashboard/stream", pollMs: 5000 });
   const summary = useQuery({ queryKey: ["reports", "summary", 14], queryFn: () => api.get<Summary>("/admin/reports/summary", { days: 14 }), refetchInterval: 60_000 });
   const d = q.data;
 

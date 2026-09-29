@@ -66,3 +66,15 @@ describe("createApi", () => {
     expect(errorMessage(err)).toBe("email: value is not a valid email");
   });
 });
+
+describe("SSE parsing", () => {
+  it("splits frames, skips pings and keeps partial frames", async () => {
+    const { parseSseChunk } = await import("../lib/api");
+    const { events, rest } = parseSseChunk('retry: 3000\n\nevent: update\ndata: {"a":1}\n\n: ping\n\nevent: end\r\ndata: {"reason":"final"}\r\n\r\nevent: upd');
+    expect(events).toEqual([
+      { event: "update", data: '{"a":1}' },
+      { event: "end", data: '{"reason":"final"}' },
+    ]);
+    expect(rest).toBe("event: upd");
+  });
+});
