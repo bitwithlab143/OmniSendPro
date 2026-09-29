@@ -45,7 +45,8 @@ class ApiClient:
             if not force and self._token and time.monotonic() < self._token_expires - 60:
                 return self._token
             r = await self._http.post(
-                "/token", json={"worker_id": self.config.worker_id, "credential": self.config.credential}
+                "/token", json={"worker_id": self.config.worker_id, "credential": self.config.credential,
+                                "instance": self.config.instance or self.config.hostname}
             )
             if r.status_code in (401, 403):
                 raise WorkerDisabledError(r.text)

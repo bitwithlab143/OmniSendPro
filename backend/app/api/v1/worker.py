@@ -30,7 +30,7 @@ router = APIRouter(prefix="/worker", tags=["worker"])
 
 @router.post("/token")
 async def token(body: WorkerTokenRequest, db: DB) -> dict[str, Any]:
-    worker, access, ttl = await worker_service.exchange_token(db, body.worker_id, body.credential)
+    worker, access, ttl = await worker_service.exchange_token(db, body.worker_id, body.credential, body.instance)
     return {"access_token": access, "token_type": "bearer", "expires_in": ttl, "worker_id": worker.worker_id}
 
 

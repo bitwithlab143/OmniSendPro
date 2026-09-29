@@ -385,6 +385,10 @@ class Worker(TimestampMixin, Base):
     active_jobs: Mapped[int] = mapped_column(Integer, default=0, server_default=text("0"))
     current_rate: Mapped[float] = mapped_column(Float, default=0.0, server_default=text("0"))
     hostname: Mapped[str | None] = mapped_column(String(255))
+    # Worker pools (design DS-23, P4-03): one credential for any number of autoscaled instances. A pool
+    # never claims jobs itself; each instance gets its own child record "<pool>--<instance>".
+    is_pool: Mapped[bool] = mapped_column(Boolean, default=False, server_default=text("false"))
+    pool_id: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("workers.id", ondelete="CASCADE"), index=True)
 
 
 class WorkerHeartbeat(Base):

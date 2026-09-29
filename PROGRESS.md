@@ -142,7 +142,7 @@ Phases follow `ARCHITECTURE.md §62 Development Phases`, plus a Phase 0 for setu
 |---|---|---|---|---|---|
 | P4-01 | PostgreSQL HA + replication | DS-14 | ⬜ | | |
 | P4-02 | Redis HA / evaluate RabbitMQ or Kafka for durability | DS-05, DS-23, ADR-002, ADR-014 | ✅ | 2026-09-29 | `REDIS_SENTINELS` in backend and workers; failover test kills the master and the client continues on the promoted replica. Broker not adopted (ADR-014) |
-| P4-03 | Worker autoscaling from queue depth | DS-08 | ⬜ | | `omnisend_queue_depth` metric is available to drive it |
+| P4-03 | Worker autoscaling from queue depth | DS-08, DS-23 | ✅ | 2026-09-29 | Worker *pools* (one credential, per-instance records, cascade disable, stale-instance pruning; migration 0009); `omnisend_workers_desired` from open jobs and `autoscale_*` settings; KEDA ScaledObject (`infrastructure/k8s/`) and `compose_autoscaler.py` (scale up now, down after cooldown) |
 | P4-04 | Observability stack: Prometheus, Grafana, Loki, OpenTelemetry | DS-15 | 🔄 | | JSON logs, `/metrics`, and an example scrape config and alert rules exist. **Remaining:** deploy the stack, dashboards, tracing |
 | P4-05 | Alerting rules (worker offline, provider degraded, queue backlog, DLQ growth) | DS-15 | 🔄 | | Rules in `infrastructure/monitoring/alerts.yml`. **Remaining:** Alertmanager routing (email/Slack) |
 | P4-06 | Backups: daily full + PITR; tested restore runbook | DS-14, DS-23 | ✅ | 2026-09-29 | `infrastructure/backup/`: checksummed `pg_dump` backups (optional S3 copy, pruning), `restore.sh` (checksum-verified, never over the live DB), `restore_drill.sh` (row counts per table + revision) run in the test suite; WAL-archiving config for PITR |

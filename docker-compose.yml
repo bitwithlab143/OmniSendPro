@@ -7,6 +7,9 @@
 #
 # Workers are provisioned in the admin panel; put WORKER_ID / WORKER_CREDENTIAL in .env, then:
 #   docker compose --profile worker up -d worker
+# With a *pool* credential (Provision → Pool) any number of containers can share it, each registering
+# under its hostname: `docker compose --profile worker up -d --scale worker=4 worker`, or let
+# infrastructure/autoscale/compose_autoscaler.py follow the omnisend_workers_desired metric (design DS-23).
 # Local SMTP sink for testing (provider host "mailpit", port 1025, security "None"):
 #   docker compose --profile dev up -d mailpit     # UI on http://localhost:8025
 
@@ -115,7 +118,7 @@ services:
       WORKER_API_URL: http://backend:8000
       WORKER_ID: ${WORKER_ID:-}
       WORKER_CREDENTIAL: ${WORKER_CREDENTIAL:-}
-      REDIS_URL: redis://redis:6379/0
+      REDIS_URL: ${WORKER_REDIS_URL:-redis://redis:6379/0}
       LOG_LEVEL: ${LOG_LEVEL:-INFO}
     depends_on: [backend]
 

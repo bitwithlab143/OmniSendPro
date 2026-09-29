@@ -48,6 +48,7 @@ class WorkerConfig:
     redis_sentinel_master: str = "omnisend"
     log_level: str = "INFO"
     hostname: str = field(default_factory=socket.gethostname)
+    instance: str | None = None  # pool credentials: this instance's name (defaults to the hostname)
     result_flush_interval: float = 1.0
     result_flush_size: int = 200
     idle_poll_max: float = 2.0
@@ -70,6 +71,7 @@ class WorkerConfig:
             max_concurrent_jobs=_int("WORKER_MAX_CONCURRENT_JOBS", 0) or None,
             smtp_connections_per_job=_int("SMTP_CONNECTIONS_PER_JOB", 4),
             redis_url=_env_or_file("REDIS_URL"),
+            instance=os.environ.get("WORKER_INSTANCE") or None,
             redis_sentinels=os.environ.get("REDIS_SENTINELS") or None,
             redis_sentinel_master=os.environ.get("REDIS_SENTINEL_MASTER", "omnisend"),
             log_level=os.environ.get("LOG_LEVEL", "INFO"),

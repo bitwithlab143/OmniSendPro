@@ -8,7 +8,8 @@ import secrets
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
-from sqlalchemy import select, update
+from sqlalchemy import delete, func, select, update
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.errors import ApiError, conflict
@@ -30,18 +31,21 @@ def new_credential() -> str:
 
 
 async def provision(db: AsyncSession, worker_id: str, name: str, capacity: int, max_concurrent_jobs: int,
-                    ctx: audit.RequestContext) -> tuple[Worker, str]:
+                    ctx: audit.RequestContext, pool: bool = False) -> tuple[Worker, str]:
     if not WORKER_ID_RE.match(worker_id):
         raise ApiError(422, "invalid_worker_id", "worker_id must be lowercase letters, digits and dashes")
     existing = (await db.execute(select(Worker).where(Worker.worker_id == worker_id))).scalar_one_or_none()
     if existing:
         raise conflict("A worker with this worker_id already exists", "duplicate_worker")
     credential = new_credential()
+    if pool and len(worker_id) > 40:
+        raise ApiError(422, "invalid_worker_id", "A pool's worker_id can be at most 40 characters")
     worker = Worker(worker_id=worker_id, name=name, capacity=capacity, max_concurrent_jobs=max_concurrent_jobs,
-                    credential_hash=sha256_hex(credential), status=WorkerStatus.OFFLINE)
+                    credential_hash=sha256_hex(credential), status=WorkerStatus.OFFLINE, is_pool=pool)
     db.add(worker)
     await db.flush()
-    audit.record(db, ctx, "WORKER_PROVISIONED", "worker", worker.id, new={"worker_id": worker_id, "name": name})
+    audit.record(db, ctx, "WORKER_PROVISIONED", "worker", worker.id,
+                 new={"worker_id": worker_id, "name": name, "pool": pool})
     await db.commit()
     return worker, credential
 
@@ -54,15 +58,89 @@ async def rotate_credential(db: AsyncSession, worker: Worker, ctx: audit.Request
     return credential
 
 
-async def exchange_token(db: AsyncSession, worker_id: str, credential: str) -> tuple[Worker, str, int]:
+_INSTANCE_CHARS = re.compile(r"[^a-z0-9-]+")
+
+
+def instance_worker_id(pool_worker_id: str, instance: str) -> str:
+    slug = _INSTANCE_CHARS.sub("-", instance.lower()).strip("-")[: 62 - len(pool_worker_id)] or "instance"
+    return f"{pool_worker_id}--{slug}"
+
+
+async def _pool_instance(db: AsyncSession, pool: Worker, instance: str | None) -> Worker:
+    """Get or create the child record for one autoscaled instance of a pool (design DS-23, P4-03)."""
+    if not instance or not instance.strip():
+        raise ApiError(422, "instance_required", "This is a pool credential: set WORKER_INSTANCE (e.g. the hostname)")
+    child_id = instance_worker_id(pool.worker_id, instance.strip())
+    child = (await db.execute(select(Worker).where(Worker.worker_id == child_id))).scalar_one_or_none()
+    if child is None:
+        child = Worker(worker_id=child_id, name=f"{pool.name} / {instance.strip()[:60]}", capacity=pool.capacity,
+                       max_concurrent_jobs=pool.max_concurrent_jobs, status=WorkerStatus.OFFLINE,
+                       credential_hash=sha256_hex(new_credential()),  # instances only ever use the pool's
+                       pool_id=pool.id, disabled=pool.disabled)
+        db.add(child)
+        try:
+            await db.commit()
+        except IntegrityError:  # another replica with the same instance name won the race
+            await db.rollback()
+            child = (await db.execute(select(Worker).where(Worker.worker_id == child_id))).scalar_one()
+    elif child.pool_id != pool.id:
+        raise ApiError(409, "instance_conflict", "A standalone worker already uses this id")
+    return child
+
+
+async def exchange_token(db: AsyncSession, worker_id: str, credential: str,
+                         instance: str | None = None) -> tuple[Worker, str, int]:
     worker = (await db.execute(select(Worker).where(Worker.worker_id == worker_id))).scalar_one_or_none()
     expected = worker.credential_hash if worker else sha256_hex("invalid")
     if worker is None or not hmac.compare_digest(expected, sha256_hex(credential)):
         raise ApiError(401, "invalid_credentials", "Invalid worker credentials")
     if worker.disabled:
         raise ApiError(403, "worker_disabled", "Worker is disabled")
+    if worker.is_pool:
+        worker = await _pool_instance(db, worker, instance)
+        if worker.disabled:
+            raise ApiError(403, "worker_disabled", "Worker is disabled")
     token, ttl = create_worker_token(worker.id, worker.worker_id)
     return worker, token, ttl
+
+
+async def set_disabled(db: AsyncSession, worker: Worker, disabled: bool) -> None:
+    """Disable/enable a worker; for a pool, every instance follows."""
+    worker.disabled = disabled
+    if worker.is_pool:
+        await db.execute(update(Worker).where(Worker.pool_id == worker.id).values(disabled=disabled))
+
+
+async def desired_workers(db: AsyncSession) -> dict[str, int]:
+    """Autoscaling signal (design DS-23, P4-03): enough workers for the open jobs, within bounds."""
+    cfg = await settings_service.get_all(db)
+    open_jobs = int((await db.execute(
+        select(func.count()).select_from(Job).where(Job.status.in_(
+            [JobStatus.PENDING, JobStatus.RETRY, JobStatus.CLAIMED, JobStatus.PROCESSING]),
+            Job.available_at <= func.now())
+    )).scalar_one())
+    per_worker = max(1, int(cfg["autoscale_jobs_per_worker"]))
+    lo, hi = int(cfg["autoscale_min_workers"]), max(int(cfg["autoscale_max_workers"]), int(cfg["autoscale_min_workers"]))
+    desired = min(hi, max(lo, -(-open_jobs // per_worker)))
+    return {"open_jobs": open_jobs, "desired": desired, "min": lo, "max": hi, "jobs_per_worker": per_worker}
+
+
+async def prune_pool_instances(db: AsyncSession, offline_for: timedelta = timedelta(hours=24)) -> int:
+    """Remove autoscaled instance records that have been gone for a while and hold no jobs."""
+    cutoff = now() - offline_for
+    stale = (await db.execute(
+        select(Worker.id).where(
+            Worker.pool_id.is_not(None), Worker.status == WorkerStatus.OFFLINE,
+            # Never-seen instances age from their creation, not immediately.
+            func.coalesce(Worker.last_heartbeat_at, Worker.created_at) < cutoff,
+            ~select(Job.id).where(Job.worker_id == Worker.id,
+                                  Job.status.in_([JobStatus.CLAIMED, JobStatus.PROCESSING])).exists(),
+        )
+    )).scalars().all()
+    if stale:
+        await db.execute(delete(Worker).where(Worker.id.in_(stale)))
+    await db.commit()
+    return len(stale)
 
 
 async def register(db: AsyncSession, worker: Worker, data: dict[str, Any]) -> dict[str, Any]:

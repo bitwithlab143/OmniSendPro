@@ -1,4 +1,6 @@
 import {
+  Checkbox,
+  Badge,
   Button,
   Card,
   CopyField,
@@ -85,7 +87,11 @@ export function WorkersPage() {
             {list.items.map((w) => (
               <TR key={w.id}>
                 <TD>
-                  <div className="font-medium">{w.name}</div>
+                  <div className="flex items-center gap-2 font-medium">
+                    {w.name}
+                    {w.is_pool && <Badge tone="info">Pool</Badge>}
+                    {w.pool_id && <Badge>Autoscaled</Badge>}
+                  </div>
                   <div className="text-xs text-fg-muted">
                     {w.worker_id}
                     {w.hostname ? ` · ${w.hostname}` : ""}
@@ -159,7 +165,10 @@ export function WorkersPage() {
           <div className="space-y-4 text-sm">
             <Field label="WORKER_ID">{() => <CopyField value={credential.worker.worker_id} />}</Field>
             <Field label="WORKER_CREDENTIAL">{() => <CopyField value={credential.credential} />}</Field>
-            <p className="text-fg-secondary">{credential.note} Set WORKER_API_URL to this control plane's public URL.</p>
+            <p className="text-fg-secondary">
+              {credential.note} Set WORKER_API_URL to this control plane's public URL.
+              {credential.worker.is_pool && " This is a pool: start as many instances as you need with the same values; scale on the omnisend_workers_desired metric."}
+            </p>
           </div>
         )}
       </Dialog>
@@ -196,6 +205,7 @@ function ProvisionDialog({ onClose, onCreated }: { onClose: () => void; onCreate
             name: f.get("name"),
             capacity: Number(f.get("capacity")),
             max_concurrent_jobs: Number(f.get("max_concurrent_jobs")),
+            pool: f.get("pool") === "on",
           });
         }}
       >
@@ -205,6 +215,11 @@ function ProvisionDialog({ onClose, onCreated }: { onClose: () => void; onCreate
         <Field label="Display name">{(id) => <Input id={id} name="name" required />}</Field>
         <Field label="Capacity (msgs/sec)">{(id) => <Input id={id} name="capacity" type="number" min={1} defaultValue={80} required />}</Field>
         <Field label="Max concurrent jobs">{(id) => <Input id={id} name="max_concurrent_jobs" type="number" min={1} max={256} defaultValue={4} required />}</Field>
+        <Checkbox
+          className="sm:col-span-2"
+          name="pool"
+          label="Pool for autoscaling: any number of worker instances share this credential; each registers under its own WORKER_INSTANCE (default: hostname)."
+        />
       </form>
     </Dialog>
   );

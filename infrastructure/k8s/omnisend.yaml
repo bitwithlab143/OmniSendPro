@@ -1,0 +1,177 @@
+# OmniSendPro reference deployment for Kubernetes (design DS-14, DS-23). Adapt images, hosts and sizes.
+# Secrets are mounted as files and read through *_FILE variables (never in env or the image):
+#   kubectl -n omnisend create secret generic omnisend-secrets \
+#     --from-literal=database_url=postgresql+asyncpg://… --from-literal=database_read_url=… \
+#     --from-literal=redis_url=redis://app:…@redis:6379/0 --from-literal=jwt_secret=… \
+#     --from-literal=worker_jwt_secret=… --from-literal=encryption_key=v1:…
+#   kubectl -n omnisend create secret generic omnisend-worker \
+#     --from-literal=credential=<pool credential> --from-literal=redis_url=redis://worker:…@redis:6379/0
+apiVersion: v1
+kind: Namespace
+metadata: { name: omnisend }
+---
+apiVersion: v1
+kind: ConfigMap
+metadata: { name: omnisend-config, namespace: omnisend }
+data:
+  APP_ENV: production
+  LOG_LEVEL: INFO
+  PUBLIC_BASE_URL: https://app.example.com
+  CORS_ORIGINS: https://app.example.com,https://admin.example.com
+  DATABASE_URL_FILE: /run/secrets/omnisend/database_url
+  DATABASE_READ_URL_FILE: /run/secrets/omnisend/database_read_url
+  REDIS_URL_FILE: /run/secrets/omnisend/redis_url
+  JWT_SECRET_FILE: /run/secrets/omnisend/jwt_secret
+  WORKER_JWT_SECRET_FILE: /run/secrets/omnisend/worker_jwt_secret
+  ENCRYPTION_KEY_FILE: /run/secrets/omnisend/encryption_key
+---
+# API: stateless, background roles run in the runner (RUN_SCHEDULER=false).
+apiVersion: apps/v1
+kind: Deployment
+metadata: { name: api, namespace: omnisend }
+spec:
+  replicas: 2
+  selector: { matchLabels: { app: api } }
+  template:
+    metadata:
+      labels: { app: api }
+      annotations: { prometheus.io/scrape: "true", prometheus.io/port: "8000", prometheus.io/path: /metrics }
+    spec:
+      securityContext: { runAsNonRoot: true, seccompProfile: { type: RuntimeDefault } }
+      initContainers:
+        - name: migrate
+          image: omnisendpro/backend:1.0.0
+          command: ["alembic", "upgrade", "head"]
+          envFrom: [{ configMapRef: { name: omnisend-config } }]
+          volumeMounts: [{ name: secrets, mountPath: /run/secrets/omnisend, readOnly: true }]
+      containers:
+        - name: api
+          image: omnisendpro/backend:1.0.0
+          ports: [{ containerPort: 8000 }]
+          env: [{ name: RUN_SCHEDULER, value: "false" }]
+          envFrom: [{ configMapRef: { name: omnisend-config } }]
+          volumeMounts:
+            - { name: secrets, mountPath: /run/secrets/omnisend, readOnly: true }
+            - { name: tmp, mountPath: /tmp }   # upload spooling (read-only root filesystem)
+          readinessProbe: { httpGet: { path: /readyz, port: 8000 }, periodSeconds: 5 }
+          livenessProbe: { httpGet: { path: /healthz, port: 8000 }, periodSeconds: 10 }
+          resources: { requests: { cpu: 250m, memory: 256Mi }, limits: { memory: 768Mi } }
+          securityContext: { allowPrivilegeEscalation: false, readOnlyRootFilesystem: true, capabilities: { drop: [ALL] } }
+      volumes:
+        - { name: secrets, secret: { secretName: omnisend-secrets } }
+        - { name: tmp, emptyDir: { sizeLimit: 1Gi } }
+---
+apiVersion: v1
+kind: Service
+metadata: { name: api, namespace: omnisend }
+spec: { selector: { app: api }, ports: [{ port: 8000, targetPort: 8000 }] }
+---
+# Runner: scheduler (leader-elected, 2 replicas for fast failover) + event/import processor.
+apiVersion: apps/v1
+kind: Deployment
+metadata: { name: runner, namespace: omnisend }
+spec:
+  replicas: 2
+  selector: { matchLabels: { app: runner } }
+  template:
+    metadata: { labels: { app: runner } }
+    spec:
+      terminationGracePeriodSeconds: 30
+      securityContext: { runAsNonRoot: true, seccompProfile: { type: RuntimeDefault } }
+      containers:
+        - name: runner
+          image: omnisendpro/backend:1.0.0
+          command: ["python", "-m", "app.runner"]
+          envFrom: [{ configMapRef: { name: omnisend-config } }]
+          volumeMounts:
+            - { name: secrets, mountPath: /run/secrets/omnisend, readOnly: true }
+            - { name: tmp, mountPath: /tmp }
+          resources: { requests: { cpu: 200m, memory: 256Mi }, limits: { memory: 768Mi } }
+          securityContext: { allowPrivilegeEscalation: false, readOnlyRootFilesystem: true, capabilities: { drop: [ALL] } }
+      volumes:
+        - { name: secrets, secret: { secretName: omnisend-secrets } }
+        - { name: tmp, emptyDir: { sizeLimit: 256Mi } }
+---
+# Delivery workers: one *pool* credential, one instance per pod (WORKER_INSTANCE = pod name).
+apiVersion: apps/v1
+kind: Deployment
+metadata: { name: worker, namespace: omnisend }
+spec:
+  replicas: 1
+  selector: { matchLabels: { app: worker } }
+  template:
+    metadata: { labels: { app: worker } }
+    spec:
+      terminationGracePeriodSeconds: 70   # finish in-flight batches (graceful shutdown)
+      securityContext: { runAsNonRoot: true, seccompProfile: { type: RuntimeDefault } }
+      containers:
+        - name: worker
+          image: omnisendpro/worker:1.0.0
+          env:
+            - { name: WORKER_API_URL, value: "http://api.omnisend.svc:8000" }
+            - { name: WORKER_ID, value: fleet }
+            - { name: WORKER_INSTANCE, valueFrom: { fieldRef: { fieldPath: metadata.name } } }
+            - { name: WORKER_CREDENTIAL_FILE, value: /run/secrets/worker/credential }
+            - { name: REDIS_URL_FILE, value: /run/secrets/worker/redis_url }
+          volumeMounts: [{ name: worker-secret, mountPath: /run/secrets/worker, readOnly: true }]
+          resources: { requests: { cpu: 500m, memory: 256Mi }, limits: { memory: 1Gi } }
+          securityContext: { allowPrivilegeEscalation: false, readOnlyRootFilesystem: true, capabilities: { drop: [ALL] } }
+      volumes: [{ name: worker-secret, secret: { secretName: omnisend-worker } }]
+---
+# KEDA: replicas follow omnisend_workers_desired (bounded by the autoscale_* settings in the admin panel).
+apiVersion: keda.sh/v1alpha1
+kind: ScaledObject
+metadata: { name: worker, namespace: omnisend }
+spec:
+  scaleTargetRef: { name: worker }
+  minReplicaCount: 1
+  maxReplicaCount: 50
+  cooldownPeriod: 300
+  triggers:
+    - type: prometheus
+      metadata:
+        serverAddress: http://prometheus.monitoring.svc:9090
+        query: max(omnisend_workers_desired)
+        threshold: "1"   # one replica per desired worker
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata: { name: web, namespace: omnisend }
+spec:
+  replicas: 2
+  selector: { matchLabels: { app: web } }
+  template:
+    metadata: { labels: { app: web } }
+    spec:
+      containers:
+        - name: web
+          image: omnisendpro/web:1.0.0
+          env: [{ name: STORAGE_UPLOAD_ORIGIN, value: "https://uploads.example.com" }]
+          ports: [{ containerPort: 8080 }, { containerPort: 8081 }]
+---
+apiVersion: v1
+kind: Service
+metadata: { name: web, namespace: omnisend }
+spec:
+  selector: { app: web }
+  ports: [{ name: user, port: 8080 }, { name: admin, port: 8081 }]
+---
+# TLS terminates at the ingress (cert-manager) or at Cloudflare in front of it. Keep the admin host behind
+# an IP allow-list / Cloudflare Access; the worker API is reached in-cluster only.
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: omnisend
+  namespace: omnisend
+  annotations:
+    nginx.ingress.kubernetes.io/proxy-read-timeout: "120"
+    nginx.ingress.kubernetes.io/proxy-body-size: 55m
+    nginx.ingress.kubernetes.io/whitelist-source-range: ""   # set for the admin host (separate Ingress)
+spec:
+  ingressClassName: nginx
+  tls: [{ hosts: [app.example.com, admin.example.com], secretName: omnisend-tls }]
+  rules:
+    - host: app.example.com
+      http: { paths: [{ path: /, pathType: Prefix, backend: { service: { name: web, port: { name: user } } } }] }
+    - host: admin.example.com
+      http: { paths: [{ path: /, pathType: Prefix, backend: { service: { name: web, port: { name: admin } } } }] }

@@ -53,7 +53,7 @@ async def list_workers(db: DB, _: WRead, status: WorkerStatus | None = None,
 @router.post("/workers", response_model=WorkerCredentialOut, status_code=201)
 async def provision_worker(body: WorkerCreate, db: DB, _: WWrite, ctx: Ctx) -> WorkerCredentialOut:
     worker, credential = await worker_service.provision(
-        db, body.worker_id, body.name, body.capacity, body.max_concurrent_jobs, ctx
+        db, body.worker_id, body.name, body.capacity, body.max_concurrent_jobs, ctx, pool=body.pool
     )
     return WorkerCredentialOut(worker=WorkerOut.model_validate(worker), credential=credential)
 
@@ -81,7 +81,7 @@ async def update_worker(worker_pk: uuid.UUID, body: WorkerUpdate, db: DB, _: WWr
 @router.post("/workers/{worker_pk}/disable", response_model=WorkerOut)
 async def disable_worker(worker_pk: uuid.UUID, db: DB, _: WWrite, ctx: Ctx) -> WorkerOut:
     worker = await _get(db, worker_pk)
-    worker.disabled = True
+    await worker_service.set_disabled(db, worker, True)
     audit.record(db, ctx, "WORKER_DISABLED", "worker", worker.id)
     await db.commit()
     await db.refresh(worker)
@@ -91,7 +91,7 @@ async def disable_worker(worker_pk: uuid.UUID, db: DB, _: WWrite, ctx: Ctx) -> W
 @router.post("/workers/{worker_pk}/enable", response_model=WorkerOut)
 async def enable_worker(worker_pk: uuid.UUID, db: DB, _: WWrite, ctx: Ctx) -> WorkerOut:
     worker = await _get(db, worker_pk)
-    worker.disabled = False
+    await worker_service.set_disabled(db, worker, False)
     audit.record(db, ctx, "WORKER_ENABLED", "worker", worker.id)
     await db.commit()
     await db.refresh(worker)
@@ -133,7 +133,8 @@ async def queue_summary(db: DB, _: QRead) -> dict:
                                                                     Job.available_at <= func.now()))
     ).scalar_one_or_none()
     return {"by_status": summary, "oldest_ready_at": oldest.isoformat() if oldest else None,
-            "event_inbox": await processor.inbox_counts(db)}
+            "event_inbox": await processor.inbox_counts(db),
+            "autoscale": await worker_service.desired_workers(db)}
 
 
 @router.get("/queues/jobs", response_model=Page[JobOut])

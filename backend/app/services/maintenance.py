@@ -77,6 +77,9 @@ async def prune(db: AsyncSession, now: datetime | None = None) -> dict[str, int]
     out["inbox"] = res.rowcount or 0
     res = await db.execute(delete(RecipientImport).where(RecipientImport.finished_at < now - timedelta(days=30)))
     out["imports"] = res.rowcount or 0
+    from app.services import workers as worker_service
+
+    out["pool_instances"] = await worker_service.prune_pool_instances(db)
     await db.commit()
     return out
 

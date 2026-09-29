@@ -313,6 +313,7 @@ class WorkerCreate(BaseModel):
     name: str = Field(min_length=1, max_length=128)
     capacity: int = Field(default=80, ge=1, le=100_000)
     max_concurrent_jobs: int = Field(default=4, ge=1, le=256)
+    pool: bool = False  # autoscaling: many instances share this credential (design DS-23)
 
 
 class WorkerUpdate(BaseModel):
@@ -338,6 +339,8 @@ class WorkerOut(ORM):
     active_jobs: int
     current_rate: float
     created_at: datetime
+    is_pool: bool = False
+    pool_id: uuid.UUID | None = None
 
 
 class WorkerCredentialOut(BaseModel):
@@ -380,6 +383,7 @@ class JobOut(ORM):
 class WorkerTokenRequest(BaseModel):
     worker_id: str
     credential: str
+    instance: str | None = Field(default=None, max_length=100)  # required for pool credentials
 
 
 class WorkerRegisterRequest(BaseModel):

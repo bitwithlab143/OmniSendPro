@@ -144,6 +144,8 @@ export interface Worker {
   active_jobs: number;
   current_rate: number;
   created_at: string;
+  is_pool: boolean;
+  pool_id: string | null;
 }
 
 export interface Job {

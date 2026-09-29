@@ -25,6 +25,7 @@ from app.runner import Processor
 from app.scheduler.loop import Scheduler
 from app.services import bootstrap, processor
 from app.services import jobs as job_service
+from app.services import workers as worker_service
 
 log = logging.getLogger("omnisend.api")
 VERSION = "0.1.0"
@@ -176,6 +177,10 @@ def create_app() -> FastAPI:
                 safe = name.replace('"', "'")
                 lines.append(f'omnisend_provider_health{{provider="{safe}",status="{status.value}"}} {score}')
             gauge("omnisend_providers_disabled", sum(1 for p in providers if p[1] == ProviderStatus.DISABLED))
+            scale = await worker_service.desired_workers(db)
+            gauge("omnisend_workers_desired", scale["desired"],
+                  help_="Worker instances needed for the open jobs (autoscaling signal, bounded by settings)")
+            gauge("omnisend_open_jobs", scale["open_jobs"], help_="Jobs ready or in progress")
             inbox = await processor.inbox_counts(db)
             gauge("omnisend_event_inbox_pending", inbox["pending"], help_="Provider reports waiting for the processor")
             gauge("omnisend_event_inbox_dead", inbox["dead"], help_="Provider reports that failed every attempt")
