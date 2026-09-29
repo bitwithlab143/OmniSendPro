@@ -1,0 +1,32 @@
+# promtool unit tests for alerts.yml:
+#   docker run --rm --entrypoint promtool -v "$PWD":/cfg prom/prometheus:v2.55.1 test rules /cfg/alerts_test.yml
+rule_files: [alerts.yml]
+evaluation_interval: 1m
+tests:
+  - interval: 1m
+    input_series:
+      - { series: 'omnisend_workers_online', values: '0x10' }
+      - { series: 'omnisend_queue_depth', values: '5x10' }
+      - { series: 'omnisend_event_inbox_dead', values: '0 0 2x8' }
+      - { series: 'omnisend_workers_desired', values: '3x20' }
+    alert_rule_test:
+      - eval_time: 6m
+        alertname: NoOnlineWorkers
+        exp_alerts: [{ exp_labels: { severity: critical }, exp_annotations: { summary: "Jobs are queued but no worker is online" } }]
+      - eval_time: 4m
+        alertname: EventInboxDeadLetters
+        exp_alerts:
+          - exp_labels: { severity: warning }
+            exp_annotations: { summary: "2 provider report(s) failed every processing attempt" }
+      - eval_time: 10m
+        alertname: WorkersBelowDesired
+        exp_alerts: []   # needs 15 minutes
+  - interval: 1m
+    input_series:
+      - { series: 'omnisend_queue_depth', values: '10x15' }
+      - { series: 'omnisend_sending_rate', values: '0x15' }
+      - { series: 'omnisend_workers_online', values: '2x15' }
+    alert_rule_test:
+      - eval_time: 11m
+        alertname: SendingStalled
+        exp_alerts: [{ exp_labels: { severity: critical }, exp_annotations: { summary: "Jobs are queued and workers are online, but nothing is being sent" } }]

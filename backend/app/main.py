@@ -14,6 +14,7 @@ from fastapi.responses import JSONResponse, PlainTextResponse
 from sqlalchemy import func, select, text
 
 from app.api.v1 import admin, auth, public, user, worker
+from app.core import tracing
 from app.core.config import get_settings
 from app.core.errors import install_error_handlers
 from app.core.logging import configure_logging
@@ -189,6 +190,7 @@ def create_app() -> FastAPI:
         gauge("omnisend_sending_rate", await job_service.sending_rate(), help_="Messages sent per second (10s avg)")
         return PlainTextResponse("\n".join(lines) + "\n", media_type="text/plain; version=0.0.4")
 
+    tracing.setup(app, get_engine())  # no-op unless OTEL_EXPORTER_OTLP_ENDPOINT is set (DS-23)
     return app
 
 

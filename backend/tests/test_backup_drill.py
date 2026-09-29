@@ -15,7 +15,18 @@ from tests.test_events_and_health import _sent_campaign
 
 ROOT = Path(__file__).resolve().parents[2]
 SCRIPTS = ROOT / "infrastructure/backup"
-pytestmark = pytest.mark.skipif(shutil.which("pg_dump") is None, reason="PostgreSQL client tools not installed")
+pytestmark = pytest.mark.skipif("_pg_dump_too_old()", reason="PostgreSQL client tools missing or older than the server")
+
+
+def _pg_dump_too_old() -> bool:
+    """pg_dump refuses servers newer than itself (e.g. an older client on a CI runner)."""
+    if shutil.which("pg_dump") is None:
+        return True
+    client = int(subprocess.run(["pg_dump", "--version"], capture_output=True, text=True,  # noqa: S603, S607
+                                check=True).stdout.split()[-1].split(".")[0])
+    server = subprocess.run(["psql", _url(), "-tAc", "SHOW server_version_num"], capture_output=True,  # noqa: S603, S607
+                            text=True)
+    return server.returncode != 0 or client < int(server.stdout.strip()) // 10000
 
 
 def _url() -> str:

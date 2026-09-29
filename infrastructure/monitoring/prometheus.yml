@@ -1,11 +1,19 @@
-# Example Prometheus scrape config (ARCHITECTURE.md §43–§44). Scrape the backend directly on the
+# Prometheus for OmniSendPro (ARCHITECTURE.md §43–§44, design DS-23). Scrapes the API directly on the
 # internal network — /metrics is intentionally not exposed through the panels' nginx servers.
 global:
   scrape_interval: 15s
+  evaluation_interval: 15s
+alerting:
+  alertmanagers:
+    - static_configs:
+        - targets: ["alertmanager:9093"]
+rule_files:
+  - alerts.yml
 scrape_configs:
   - job_name: omnisend-backend
     metrics_path: /metrics
     static_configs:
       - targets: ["backend:8000"]
-rule_files:
-  - alerts.yml
+  - job_name: prometheus
+    static_configs:
+      - targets: ["localhost:9090"]

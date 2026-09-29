@@ -25,3 +25,28 @@ groups:
         for: 15m
         labels: { severity: warning }
         annotations: { summary: "Queue backlog above 1000 jobs for 15 minutes" }
+      - alert: ApiDown
+        expr: up{job="omnisend-backend"} == 0
+        for: 2m
+        labels: { severity: critical }
+        annotations: { summary: "The API /metrics endpoint is not reachable" }
+      - alert: EventInboxBacklog
+        expr: omnisend_event_inbox_oldest_seconds > 300
+        for: 5m
+        labels: { severity: warning }
+        annotations: { summary: "Provider reports have waited over 5 minutes: is the runner/processor running?" }
+      - alert: EventInboxDeadLetters
+        expr: omnisend_event_inbox_dead > 0
+        for: 1m
+        labels: { severity: warning }
+        annotations: { summary: "{{ $value }} provider report(s) failed every processing attempt" }
+      - alert: WorkersBelowDesired
+        expr: omnisend_workers_online < omnisend_workers_desired
+        for: 15m
+        labels: { severity: warning }
+        annotations: { summary: "Fewer workers online than the autoscaling signal asks for" }
+      - alert: SendingStalled
+        expr: omnisend_queue_depth > 0 and omnisend_sending_rate == 0 and omnisend_workers_online > 0
+        for: 10m
+        labels: { severity: critical }
+        annotations: { summary: "Jobs are queued and workers are online, but nothing is being sent" }

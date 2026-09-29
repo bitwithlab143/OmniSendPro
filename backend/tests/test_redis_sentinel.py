@@ -11,6 +11,7 @@ from collections.abc import Iterator
 from pathlib import Path
 
 import pytest
+from redis.asyncio import Redis
 
 from app.core.redis import sentinel_client
 
@@ -63,13 +64,17 @@ async def test_discovery_and_failover(sentinel_cluster: dict) -> None:
     try:
         await client.set("probe", "before")
         assert await client.get("probe") == "before"
-        # Wait until the replica is in sync and known to Sentinel, then lose the master.
-        for _ in range(100):
-            info = await client.info("replication")
-            if info.get("connected_slaves", 0) >= 1:
+        # Sentinel learns about replicas from the master's INFO, polled every 10 s: wait until it lists
+        # the replica (otherwise there is nothing to promote), then lose the master.
+        host, port = sentinel_cluster["sentinels"].split(":")
+        sentinel = Redis(host=host, port=int(port), decode_responses=True)
+        for _ in range(300):
+            replicas = await sentinel.execute_command("SENTINEL", "REPLICAS", "omnisend")
+            if replicas:
                 break
             await asyncio.sleep(0.1)
-        await asyncio.sleep(1.5)  # sentinel discovers the replica through the master's INFO
+        await sentinel.aclose()
+        assert replicas, "sentinel never discovered the replica"
         sentinel_cluster["procs"]["master"].kill()
         started = time.monotonic()
         recovered = False
