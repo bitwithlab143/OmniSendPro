@@ -585,23 +585,25 @@ Format: **Context → Decision → Consequences**. Status: Proposed / Accepted /
 
 Resolve these before implementing the affected areas. Record the answer, the date, and who decided.
 
+**2026-09-29:** to unblock Phase 0/1 the *Proposed answer* of every question below was adopted as the working default (status **Accepted (default)**). Any of them can still be overridden by the product owner; changing one requires updating the affected DS sections and the code. OQ-15 remains a question for the document author, but no work is blocked on it.
+
 | ID | Question | Affects | Proposed answer | Status |
 |---|---|---|---|---|
-| OQ-01 | What is the tenancy model? Is each *user* a tenant, or is there an organisation/account above users? §2 says "multi-tenant" but no tenant table exists. | DS-03, all queries | Start with user = tenant; add `organizations` later if needed | Open |
-| OQ-02 | Who creates campaigns? §1 says users *receive assigned* campaigns, but §7 lets users enter name, subject, and file. What does `campaigns.user_id` mean: owner or assignee? | DS-04, DS-09, DS-13 | Admin *or* user can create; `user_id` = the user who sends; `created_by` = creator | Open |
-| OQ-03 | Where is the email content? `campaigns` has no body/template fields. Is personalisation (merge variables) needed? | DS-03, worker | Add `html_body`, `text_body`, and simple `{{var}}` merge from `campaign_recipients.variables` | Open |
-| OQ-04 | How do jobs map to recipients? `jobs` has no batch reference, even though `campaign_batches` exists. | DS-03, DS-05 | Add `jobs.batch_id`; one job per batch | Open |
-| OQ-05 | Is suppression global or per user? | DS-07 | Bounce/complaint/admin_blocked global; unsubscribe per user | Open |
-| OQ-06 | What are the heartbeat interval and the WARNING/OFFLINE thresholds? | DS-08 | 10 s / 30 s / 90 s, configurable | Open |
-| OQ-07 | What is the provider health formula, and where are the state thresholds (DEGRADED has no example)? | DS-06 | See DS-06 table; tune after load tests | Open |
-| OQ-08 | The admin menu campaign states (Pending/Processing/Completed/Failed) differ from the §50 state machine. | DS-04, DS-12 | Menu = filtered views over the state machine | Open |
-| OQ-09 | Job status vocabulary and the missing columns (`attempt_id`, `idempotency_key`, lease) required by §31/§47. | DS-03, DS-05 | Adopt DS-05 state machine + ADR-010 columns | Open |
-| OQ-10 | Is batch size limited to fixed options (500/1000/5000) or free input within limits? | DS-13 | Presets + custom, capped by limits | Open |
-| OQ-11 | If a user has several assigned providers, is one chosen per campaign, or can load be spread across them? | DS-05, DS-06 | One provider per campaign (MVP). Any later spreading must respect each provider's own limits and policies, never evade them | Open |
-| OQ-12 | How are bounce and complaint events received per provider (webhooks, DSN mailbox, FBL)? | DS-05, DS-07 | Webhooks for API providers; DSN mailbox parsing for raw SMTP (Phase 2) | Open |
-| OQ-13 | What does "Assigned 100,000 / Today's Sending" mean (daily quota vs assigned campaign volume)? What is `subscriptions` for? | DS-03, DS-13 | Daily quota from `user_limits.daily_limit`; `subscriptions` = billing plan (defer) | Open |
-| OQ-14 | What retention and deletion policy applies to recipient PII and `email_events` (GDPR, erasure requests)? | DS-03, DS-11 | Configurable retention (e.g. 13 months events); erasure keeps a hashed suppression entry | Open |
-| OQ-15 | `ARCHITECTURE.md` skips §19 and §59. Was content lost? | all | Ask the document author | Open |
+| OQ-01 | What is the tenancy model? Is each *user* a tenant, or is there an organisation/account above users? §2 says "multi-tenant" but no tenant table exists. | DS-03, all queries | Start with user = tenant; add `organizations` later if needed | Accepted (default) |
+| OQ-02 | Who creates campaigns? §1 says users *receive assigned* campaigns, but §7 lets users enter name, subject, and file. What does `campaigns.user_id` mean: owner or assignee? | DS-04, DS-09, DS-13 | Admin *or* user can create; `user_id` = the user who sends; `created_by` = creator | Accepted (default) |
+| OQ-03 | Where is the email content? `campaigns` has no body/template fields. Is personalisation (merge variables) needed? | DS-03, worker | Add `html_body`, `text_body`, and simple `{{var}}` merge from `campaign_recipients.variables` | Accepted (default) |
+| OQ-04 | How do jobs map to recipients? `jobs` has no batch reference, even though `campaign_batches` exists. | DS-03, DS-05 | Add `jobs.batch_id`; one job per batch | Accepted (default) |
+| OQ-05 | Is suppression global or per user? | DS-07 | Bounce/complaint/admin_blocked global; unsubscribe per user | Accepted (default) |
+| OQ-06 | What are the heartbeat interval and the WARNING/OFFLINE thresholds? | DS-08 | 10 s / 30 s / 90 s, configurable | Accepted (default) |
+| OQ-07 | What is the provider health formula, and where are the state thresholds (DEGRADED has no example)? | DS-06 | See DS-06 table; tune after load tests | Accepted (default) |
+| OQ-08 | The admin menu campaign states (Pending/Processing/Completed/Failed) differ from the §50 state machine. | DS-04, DS-12 | Menu = filtered views over the state machine | Accepted (default) |
+| OQ-09 | Job status vocabulary and the missing columns (`attempt_id`, `idempotency_key`, lease) required by §31/§47. | DS-03, DS-05 | Adopt DS-05 state machine + ADR-010 columns | Accepted (default) |
+| OQ-10 | Is batch size limited to fixed options (500/1000/5000) or free input within limits? | DS-13 | Presets + custom, capped by limits | Accepted (default) |
+| OQ-11 | If a user has several assigned providers, is one chosen per campaign, or can load be spread across them? | DS-05, DS-06 | One provider per campaign (MVP). Any later spreading must respect each provider's own limits and policies, never evade them | Accepted (default) |
+| OQ-12 | How are bounce and complaint events received per provider (webhooks, DSN mailbox, FBL)? | DS-05, DS-07 | Webhooks for API providers; DSN mailbox parsing for raw SMTP (Phase 2) | Accepted (default) |
+| OQ-13 | What does "Assigned 100,000 / Today's Sending" mean (daily quota vs assigned campaign volume)? What is `subscriptions` for? | DS-03, DS-13 | Daily quota from `user_limits.daily_limit`; `subscriptions` = billing plan (defer) | Accepted (default) |
+| OQ-14 | What retention and deletion policy applies to recipient PII and `email_events` (GDPR, erasure requests)? | DS-03, DS-11 | Configurable retention (e.g. 13 months events); erasure keeps a hashed suppression entry | Accepted (default) |
+| OQ-15 | `ARCHITECTURE.md` skips §19 and §59. Was content lost? | all | Ask the document author | Accepted (default) |
 
 ---
 
