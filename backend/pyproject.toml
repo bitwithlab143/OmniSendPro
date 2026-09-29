@@ -56,4 +56,5 @@ ignore = ["B008", "S101", "E501"]
 
 [tool.ruff.lint.per-file-ignores]
 "tests/*" = ["S105", "S106", "S311"]
-"migrations/*" = ["E501"]
+"migrations/*" = ["E501", "S608"]  # identifiers come from fixed constants, never from input
+"app/db/partitions.py" = ["S608"]   # table/column names come from the TABLES constant

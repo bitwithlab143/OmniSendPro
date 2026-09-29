@@ -8,6 +8,7 @@ Duties per tick:
   * mark workers WARNING/OFFLINE when heartbeats stop (§10)
   * finish campaigns with no open jobs
   * provider health scoring (every `HEALTH_INTERVAL_SECONDS`)
+  * data lifecycle: partitions + retention (every `MAINTENANCE_INTERVAL_SECONDS`, DS-18)
 """
 
 from __future__ import annotations
@@ -22,7 +23,7 @@ import time
 from app.core.config import get_settings
 from app.core.redis import Keys, get_redis
 from app.db.session import sessionmaker
-from app.services import bounce_mailbox, health
+from app.services import bounce_mailbox, health, maintenance
 from app.services import campaigns as campaign_service
 from app.services import jobs as job_service
 from app.services import workers as worker_service
@@ -39,6 +40,7 @@ class Scheduler:
         self._task: asyncio.Task[None] | None = None
         self._stop = asyncio.Event()
         self._last_health = 0.0
+        self._last_maintenance = 0.0
 
     async def _acquire(self, key: str, ttl: int) -> bool:
         redis = get_redis()
@@ -52,7 +54,8 @@ class Scheduler:
 
     async def tick(self) -> dict[str, int]:
         """One scheduler pass. Public so tests and ops tooling can drive it deterministically."""
-        stats = {"built": 0, "recovered": 0, "offline": 0, "completed": 0, "health_changes": 0, "bounce_reports": 0}
+        stats = {"built": 0, "recovered": 0, "offline": 0, "completed": 0, "health_changes": 0, "bounce_reports": 0,
+                 "maintenance": 0}
         maker = sessionmaker()
         async with maker() as db:
             for cid in await campaign_service.campaigns_needing_batches(db):
@@ -80,6 +83,11 @@ class Scheduler:
                 stats["health_changes"] = len(changes)
                 for name, old, new in changes:
                     log.warning("provider_state_changed", extra={"provider": name, "from": old, "to": new})
+        if time.monotonic() - self._last_maintenance >= self.settings.maintenance_interval_seconds:
+            self._last_maintenance = time.monotonic()
+            async with maker() as db:
+                summary = await maintenance.run(db)
+                stats["maintenance"] = int(summary["partitions_created"] + summary["partitions_dropped"])
         return stats
 
     async def run(self) -> None:

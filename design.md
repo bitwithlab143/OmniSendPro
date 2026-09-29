@@ -5,7 +5,7 @@
 > - Work tracking: [`PROGRESS.md`](./PROGRESS.md). Each task there references the `DS-xx` / `ADR-xxx` item it implements.
 
 **Last updated:** 2026-09-29
-**Document version:** 0.4.2
+**Document version:** 0.5.0
 
 ---
 
@@ -49,6 +49,12 @@
 | [DS-15](#ds-15-observability-metrics--testing) | Observability, metrics & testing | Implemented | §43–§44, §63–§64 |
 | [DS-16](#ds-16-asynchronous-bounces--complaints-dsn--arf) | Asynchronous bounces & complaints (DSN / ARF) | Implemented | §23, §24, P2-10 |
 | [DS-17](#ds-17-api-keys) | API keys | Implemented | §6 (System → API Keys), §32, P2-15 |
+| [DS-18](#ds-18-data-lifecycle-partitioning--retention) | Data lifecycle: partitioning & retention | Accepted | §57, P3-11, P3-12 |
+| [DS-19](#ds-19-background-runtime-scheduler--processor-processes) | Background runtime: scheduler & processor | Accepted | §21, §23, §60–§61, P3-02, P3-06 |
+| [DS-20](#ds-20-real-time-updates-sse) | Real-time updates (SSE) | Accepted | §42, ADR-009, P3-03 |
+| [DS-21](#ds-21-large-recipient-files-object-storage--import-worker) | Large recipient files: object storage & import worker | Accepted | §55, P3-04, P3-05 |
+| [DS-22](#ds-22-smtp-pipelining--chunking) | SMTP pipelining & chunking | Accepted | §20, P3-15 |
+| [DS-23](#ds-23-production-hardening-ha-dr-scaling--observability) | Production hardening: HA, DR, scaling & observability | Accepted | §37–§46, Phase 4 |
 
 ---
 
@@ -592,6 +598,184 @@ Programmatic access for integrations (CRM, data pipelines) to the **User API** o
 
 ---
 
+## DS-18 Data lifecycle: partitioning & retention
+
+**Status:** Accepted (2026-09-29) — tasks P3-11, P3-12.
+
+High-volume, append-only tables are **range-partitioned** by their timestamp. Retention works by dropping
+whole partitions, which is instant and never bloats the table.
+
+| Table | Key | Partition | Default retention (setting) |
+|---|---|---|---|
+| `email_events` | `created_at` | monthly | 400 days (`retention_events_days`) |
+| `audit_logs` | `timestamp` | monthly | 400 days (`retention_audit_days`, minimum 90) |
+| `provider_health_logs` | `created_at` | monthly | 90 days (`retention_health_days`) |
+| `worker_heartbeats` | `timestamp` | daily | 14 days (`retention_heartbeat_days`) |
+
+- Primary keys become `(id, <timestamp>)` because PostgreSQL requires the partition key in every unique
+  constraint. Every table also has a `DEFAULT` partition, so an insert can never fail because a partition is
+  missing.
+- **Event de-duplication** cannot be a unique index on the partitioned `email_events` table without adding
+  `created_at`, which would break it. Instead, dedupe keys live in a small unpartitioned table
+  `email_event_keys (provider_id, provider_message_id, event_type)` (ADR-013). It is inserted `ON CONFLICT DO
+  NOTHING` in the same transaction as the event, and rows older than the event retention are deleted.
+- **Maintenance job** (`app/services/maintenance.py`, run by the scheduler leader every
+  `MAINTENANCE_INTERVAL_SECONDS`, default 3600):
+  1. Create partitions for the current period and the next 2 (daily tables: next 7 days). If the `DEFAULT`
+     partition already holds rows for that range, they are moved into the new partition inside the same
+     transaction before it is attached.
+  2. Drop partitions whose upper bound is older than the retention.
+  3. Delete expired or long-revoked refresh tokens (more than 1 day past expiry), processed event-inbox rows
+     older than 7 days, finished recipient imports older than 30 days, and stale dedupe keys.
+- Migration 0005 converts the four tables in place (create partitioned table → copy → swap) and is
+  reversible.
+
+---
+
+## DS-19 Background runtime: scheduler & processor processes
+
+**Status:** Accepted (2026-09-29) — tasks P3-02, P3-05, P3-06.
+
+`python -m app.runner <roles…>` runs background roles outside the API (compose service `scheduler`).
+The API runs the same roles in-process when `RUN_SCHEDULER=true` (development default), so a single
+process still works.
+
+| Role | What it does | Concurrency |
+|---|---|---|
+| `scheduler` | Existing tick (batches, leases, worker status, completion, health, bounce mailboxes) plus maintenance | Leader only (`lock:scheduler`) |
+| `processor` | Event inbox and recipient imports | Any number of replicas (`FOR UPDATE SKIP LOCKED`) |
+
+**Event pipeline (P3-06).** `Receiver → Validator → Inbox → Processor`. The webhook and raw-report
+endpoints authenticate (HMAC) and validate (schema, size) as before, then insert one row into
+`event_inbox (id, provider_id, kind json|raw, payload, received_at, attempts, next_attempt_at, processed_at,
+last_error)` and return **202** `{"queued": n}`. The processor claims batches of up to 100 rows with
+`SKIP LOCKED`, runs `events.ingest` or `inbound.process_raw`, and marks each row processed. Failures are
+retried with backoff (up to 10 attempts), then kept with `last_error` for an operator to inspect. Redis key
+`wake:processor` wakes it immediately. Provider bursts therefore never hold API connections open for
+DB-heavy processing, and a slow database only delays processing; events are not lost.
+
+**Recipient imports (P3-05).** See DS-21.
+
+Graceful shutdown: SIGTERM stops claiming, finishes the current batch, and releases the scheduler lock.
+
+---
+
+## DS-20 Real-time updates (SSE)
+
+**Status:** Accepted (2026-09-29) — task P3-03, implements ADR-009.
+
+- Endpoints (`text/event-stream`, `Cache-Control: no-store`, `X-Accel-Buffering: no`):
+  - `GET /user/campaigns/{id}/stream`, `GET /user/dashboard/stream`
+  - `GET /admin/campaigns/{id}/stream`, `GET /admin/dashboard/stream`
+- The server builds the same payload as the matching GET endpoint once per interval (1 s for campaigns, 2 s
+  for dashboards). It sends `event: update` only when the JSON changes and a `: ping` comment every 15 s,
+  and closes after 5 minutes (the client reconnects). A campaign stream ends after the first update in a
+  terminal state.
+- Auth uses the normal bearer token. The browser client uses `fetch` streaming (EventSource cannot send an
+  `Authorization` header). `useLiveQuery` in `web-shared` writes each update into the TanStack Query cache.
+  If the stream fails it falls back to polling, then retries the stream with backoff. API keys may use the
+  user streams too.
+- nginx: buffering is disabled by the response header; `proxy_read_timeout` ≥ 330 s on `/api/`.
+
+---
+
+## DS-21 Large recipient files: object storage & import worker
+
+**Status:** Accepted (2026-09-29) — tasks P3-04, P3-05.
+
+- Optional S3-compatible storage (AWS S3, Cloudflare R2, MinIO): `OBJECT_STORAGE_ENDPOINT`,
+  `OBJECT_STORAGE_BUCKET`, `OBJECT_STORAGE_REGION`, `OBJECT_STORAGE_ACCESS_KEY`, `OBJECT_STORAGE_SECRET_KEY`,
+  `OBJECT_STORAGE_MAX_BYTES` (default 1 GiB). When it is not configured, the existing direct upload (≤
+  `MAX_UPLOAD_BYTES`) is the only path.
+- Flow:
+  1. `POST /…/campaigns/{id}/recipients/upload-url` returns a **presigned POST** (URL and form fields)
+     restricted to one object key `imports/{user_id}/{campaign_id}/{uuid}.csv`, a `content-length-range`,
+     and 15 minutes' validity. The browser uploads directly to the bucket, so the API never carries the
+     bytes.
+  2. `POST /…/campaigns/{id}/recipients/imports {object_key, replace}` validates that the key belongs to
+     this campaign and user, creates `recipient_imports (id, campaign_id, user_id, source, object_key,
+     replace, status queued|processing|completed|failed, rows, imported, invalid, duplicates,
+     invalid_samples, error, created_at, started_at, finished_at)` and returns 202.
+  3. A `processor` replica claims the import (`SKIP LOCKED`), streams the object through a presigned GET
+     (httpx) into the same streaming CSV parser as direct uploads, commits every chunk, and updates
+     progress. It then deletes the object. The campaign cannot be started while an import is queued or
+     processing.
+  4. `GET /…/campaigns/{id}/recipients/imports` lists imports and progress; the UI polls or streams it.
+- boto3 is used only to **sign** URLs (no network calls). All transfers use httpx streaming (ADR-015).
+- Bucket requirements (documented): private, CORS allowing `POST` from the panel origins, and a lifecycle
+  rule deleting `imports/` objects after 2 days as a safety net.
+
+---
+
+## DS-22 SMTP pipelining & chunking
+
+**Status:** Accepted (2026-09-29) — task P3-15.
+
+With one recipient per message (needed for per-recipient unsubscribe and tracking), a classic SMTP
+transaction costs four round trips: MAIL, RCPT, DATA, then the message body. On a 50 ms link that caps one
+connection at about 5 messages/s.
+
+- The worker's SMTP sender is a small purpose-built asyncio client (`worker/app/providers/smtp_client.py`).
+  It handles connect, implicit TLS or STARTTLS, EHLO, and AUTH PLAIN/LOGIN, then sends messages:
+  - **CHUNKING + PIPELINING advertised:** `MAIL`, `RCPT`, `BDAT <n> LAST` and the body in **one write**,
+    then read 3 replies: **1 round trip**.
+  - **PIPELINING only:** `MAIL`, `RCPT` and `DATA` in one write, read 3 replies, then send the dot-stuffed
+    body: **2 round trips**.
+  - **Neither:** classic lock-step (4 round trips).
+- The client never pipelines a command group the server did not advertise (RFC 2920 §3.1). If MAIL or RCPT
+  is rejected, the reply to `BDAT`/`DATA` is still read, then `RSET` restores a clean state. Error
+  classification is unchanged (`SmtpReply(code, message)` with the same classes as aiosmtplib).
+- `WORKER_SMTP_PIPELINING=false` turns pipelining and chunking off (lock-step mode) for a misbehaving server.
+- The backend's provider *Test connection* keeps using aiosmtplib.
+
+---
+
+## DS-23 Production hardening: HA, DR, scaling & observability
+
+**Status:** Accepted (2026-09-29) — Phase 4.
+
+**Database (P4-01).** Primary plus streaming replica. The app accepts `DATABASE_READ_URL`: reports, report
+exports and dashboards read from it (tolerating replication lag). Everything else, including anything
+that writes or claims, uses the primary. Failover is done by the platform (managed PostgreSQL, or
+Patroni). `infrastructure/ha/` contains a reference compose file with a streaming replica for testing.
+
+**Redis (P4-02).** `REDIS_SENTINELS=host:port,…` plus `REDIS_SENTINEL_MASTER` switch the backend and
+workers to Sentinel discovery. Redis holds no job state (ADR-002), so failover costs at most a few seconds
+of rate-limit and live-stats accuracy. RabbitMQ/Kafka are not adopted (ADR-014).
+
+**Worker autoscaling (P4-03).** *Worker pools*: a worker record provisioned as a **pool** issues tokens to
+many instances. An instance exchanges the pool credential plus `WORKER_INSTANCE` (default: hostname) and
+gets its own child worker record `<pool>/<instance>` (created on first use; it inherits the pool's
+disabled state and capacity). Children that have been offline for 24 h and hold no jobs are deleted by
+maintenance. Scaling signal: gauge `omnisend_workers_desired = clamp(ceil(claimable_jobs /
+jobs_per_worker), min, max)`, using settings `autoscale_jobs_per_worker` (default 4),
+`autoscale_min_workers` (1) and `autoscale_max_workers` (20). It is consumed by KEDA (example ScaledObject)
+or by `infrastructure/autoscale/compose_autoscaler.py`.
+
+**Backups & DR (P4-06).** `infrastructure/backup/backup.sh` writes a daily `pg_dump -Fc` (checksummed,
+optional upload through the S3 settings) and the WAL-archiving settings for PITR are documented.
+`restore.sh` restores into a scratch database. `restore_drill.sh` backs up, restores into a new database
+and compares row counts per table. The drill runs in the test suite.
+
+**Queue recovery drill (P4-07).** An automated end-to-end test runs a campaign against a dedicated Redis,
+kills Redis mid-send, restarts it empty and asserts every recipient ends up sent **exactly once**.
+
+**Observability (P4-04/P4-05).** A `monitoring` compose profile runs Prometheus, Alertmanager, Grafana
+(provisioned datasource and "OmniSendPro overview" dashboard), Loki and Promtail. Optional OpenTelemetry
+tracing (FastAPI, SQLAlchemy, httpx) is enabled when `OTEL_EXPORTER_OTLP_ENDPOINT` is set.
+Alertmanager routes to email and/or Slack from environment-provided receivers.
+
+**Worker Redis ACL (P4-10).** Workers use Redis only for the shared token bucket. `infrastructure/redis/
+users.acl` defines user `worker` limited to keys `rl:*` and the commands the bucket needs (`EVALSHA`,
+`EVAL`, `SCRIPT LOAD`, `PING`). It cannot read quotas, sessions or stats. The backend uses a separate
+`app` user.
+
+**Deployment (P4-08).** All secrets accept `<NAME>_FILE` (Docker/Kubernetes secrets, secret-manager CSI).
+`infrastructure/k8s/` has reference manifests (api, runner, workers with KEDA, nginx ingress). Cloudflare
+and TLS guidance is in DEPLOYMENT.md. A real environment is still an operator task.
+
+---
+
 ## Architecture Decision Records (ADRs)
 
 Format: **Context → Decision → Consequences**. Status: Proposed / Accepted / Superseded.
@@ -664,6 +848,34 @@ Format: **Context → Decision → Consequences**. Status: Proposed / Accepted /
   `/api/v1/user/*` (excluding credential/profile management). Admin automation stays interactive.
 - **Consequences:** Integrations can create/upload/start/monitor campaigns; admin tasks cannot be
   scripted with keys (revisit with a separate, IP-restricted service-account design if needed).
+
+### ADR-013: Event de-duplication in a separate key table
+- **Status:** Accepted (2026-09-29)
+- **Context:** Partitioning `email_events` by time (DS-18) forbids a global unique index on `(provider_id,
+  provider_message_id, event_type)`.
+- **Decision:** Keep dedupe keys in an unpartitioned `email_event_keys` table with that primary key; insert
+  it in the same transaction as the event, and prune keys past the event retention.
+- **Consequences:** Same guarantees as before; one extra small insert per provider event.
+
+### ADR-014: No message broker (RabbitMQ/Kafka) for now
+- **Status:** Accepted (2026-09-29)
+- **Decision:** PostgreSQL stays the queue (ADR-002). Measured claim throughput (≈5k msgs/s with 3 workers
+  on one machine, 200 recipients per job) is far above the 417 msgs/s target, and a broker would add a
+  second source of truth for job state.
+- **Revisit when:** claims exceed ~2k jobs/s, or cross-region workers need a local queue.
+
+### ADR-015: Object storage via presigned URLs only
+- **Status:** Accepted (2026-09-29)
+- **Decision:** boto3 only signs URLs; uploads go browser → bucket (presigned POST with a size limit) and
+  the import worker streams the object with httpx. The API never proxies file bytes and needs no long-lived
+  storage connections.
+
+### ADR-016: Own SMTP client for the send path
+- **Status:** Accepted (2026-09-29)
+- **Context:** aiosmtplib reads responses one at a time and drops data that arrives while a response is
+  already waiting, so it cannot pipeline (DS-22).
+- **Decision:** A focused client for the hot path (connect/TLS/AUTH/send); aiosmtplib remains for the backend
+  connection test. The client is covered by tests against a real SMTP sink in all three modes.
 
 ---
 
@@ -809,6 +1021,8 @@ retention (P3-11/12), and Phase 4 hardening.
 ## Design changelog
 
 Newest first.
+
+- **2026-09-29 · v0.5.0**: Phase 3/4 designs: DS-18 (partitioning & retention), DS-19 (scheduler/processor processes, event inbox), DS-20 (SSE), DS-21 (object storage & import worker), DS-22 (SMTP pipelining/chunking), DS-23 (HA, DR, autoscaling, observability, Redis ACL, deployment); ADR-013…ADR-016.
 
 - **2026-09-29 · v0.4.2**: DS-17 implemented; implementation notes 25–26.
 - **2026-09-29 · v0.4.1**: DS-16 implemented; implementation notes 23–24 (explicit `reports_delivery` flag, bounce-mailbox safety).

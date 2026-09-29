@@ -18,6 +18,7 @@ from sqlalchemy import (
     Identity,
     Index,
     Integer,
+    Sequence,
     String,
     Table,
     Text,
@@ -249,7 +250,8 @@ class ProviderAssignment(Base):
 
 class ProviderHealthLog(Base):
     __tablename__ = "provider_health_logs"
-    id: Mapped[int] = mapped_column(BigInteger, Identity(), primary_key=True)
+    id: Mapped[int] = mapped_column(BigInteger, Sequence("provider_health_logs_id_seq"), primary_key=True,
+                                    server_default=text("nextval('provider_health_logs_id_seq'::regclass)"))
     provider_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("providers.id", ondelete="CASCADE"))
     window_start: Mapped[datetime] = mapped_column(DateTime(timezone=True))
     attempts: Mapped[int] = mapped_column(Integer, default=0)
@@ -262,8 +264,11 @@ class ProviderHealthLog(Base):
     complaints: Mapped[int] = mapped_column(Integer, default=0)
     health_score: Mapped[float] = mapped_column(Float)
     status: Mapped[str] = mapped_column(String(32))
-    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
-    __table_args__ = (Index("ix_provider_health_logs_provider_time", "provider_id", "created_at"),)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(),
+                                                 primary_key=True)
+    # Range-partitioned by month (design DS-18); the partition key must be part of the primary key.
+    __table_args__ = (Index("ix_provider_health_logs_provider_time", "provider_id", "created_at"),
+                      {"postgresql_partition_by": "RANGE (created_at)"})
 
 
 # --------------------------------------------------------------------------- campaigns
@@ -378,15 +383,17 @@ class Worker(TimestampMixin, Base):
 
 class WorkerHeartbeat(Base):
     __tablename__ = "worker_heartbeats"
-    __table_args__ = (Index("ix_worker_heartbeats_worker_time", "worker_id", "timestamp"),)
-    id: Mapped[int] = mapped_column(BigInteger, Identity(), primary_key=True)
+    __table_args__ = (Index("ix_worker_heartbeats_worker_time", "worker_id", "timestamp"),
+                      {"postgresql_partition_by": "RANGE (timestamp)"})  # daily partitions (DS-18)
+    id: Mapped[int] = mapped_column(BigInteger, Sequence("worker_heartbeats_id_seq"), primary_key=True,
+                                    server_default=text("nextval('worker_heartbeats_id_seq'::regclass)"))
     worker_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("workers.id", ondelete="CASCADE"))
     status: Mapped[str] = mapped_column(String(32))
     cpu: Mapped[float | None] = mapped_column(Float)
     memory: Mapped[float | None] = mapped_column(Float)
     active_jobs: Mapped[int] = mapped_column(Integer, default=0)
     current_rate: Mapped[float] = mapped_column(Float, default=0.0)
-    timestamp: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+    timestamp: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), primary_key=True)
 
 
 class Job(TimestampMixin, Base):
@@ -446,17 +453,11 @@ class EmailEvent(Base):
     __table_args__ = (
         Index("idx_events_campaign_time", "campaign_id", "created_at"),
         Index("ix_email_events_created_at", "created_at"),
-        Index(
-            "uq_email_events_provider_dedupe",
-            "provider_id",
-            "provider_message_id",
-            "event_type",
-            unique=True,
-            postgresql_where=text("provider_message_id IS NOT NULL AND event_type IN "
-                                  "('delivered', 'bounced', 'complained', 'unsubscribed')"),
-        ),
+        # Monthly range partitions (DS-18). Provider-event de-duplication lives in email_event_keys (ADR-013).
+        {"postgresql_partition_by": "RANGE (created_at)"},
     )
-    id: Mapped[int] = mapped_column(BigInteger, Identity(), primary_key=True)
+    id: Mapped[int] = mapped_column(BigInteger, Sequence("email_events_id_seq"), primary_key=True,
+                                    server_default=text("nextval('email_events_id_seq'::regclass)"))
     campaign_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("campaigns.id", ondelete="CASCADE"))
     job_id: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("jobs.id", ondelete="SET NULL"))
     recipient_id: Mapped[int | None] = mapped_column(BigInteger)
@@ -466,7 +467,18 @@ class EmailEvent(Base):
     provider_message_id: Mapped[str | None] = mapped_column(String(255))
     error_code: Mapped[str | None] = mapped_column(String(64))
     error_message: Mapped[str | None] = mapped_column(String(512))
-    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(),
+                                                 primary_key=True)
+
+
+class EmailEventKey(Base):
+    """De-duplication keys for provider-reported events (ADR-013); unpartitioned, pruned by retention."""
+
+    __tablename__ = "email_event_keys"
+    provider_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True)
+    provider_message_id: Mapped[str] = mapped_column(String(255), primary_key=True)
+    event_type: Mapped[str] = mapped_column(String(32), primary_key=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), index=True)
 
 
 # --------------------------------------------------------------------------- compliance & system
@@ -499,8 +511,10 @@ class AuditLog(Base):
     __table_args__ = (
         Index("ix_audit_logs_timestamp", "timestamp"),
         Index("ix_audit_logs_resource", "resource", "resource_id"),
+        {"postgresql_partition_by": "RANGE (timestamp)"},  # monthly partitions (DS-18)
     )
-    id: Mapped[int] = mapped_column(BigInteger, Identity(), primary_key=True)
+    id: Mapped[int] = mapped_column(BigInteger, Sequence("audit_logs_id_seq"), primary_key=True,
+                                    server_default=text("nextval('audit_logs_id_seq'::regclass)"))
     admin_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), index=True)
     actor_type: Mapped[str] = mapped_column(String(16), default="user")  # user | system | worker
     action: Mapped[str] = mapped_column(String(64))
@@ -510,7 +524,7 @@ class AuditLog(Base):
     new_value: Mapped[dict[str, Any] | None] = mapped_column(JSONB)
     ip: Mapped[str | None] = mapped_column(String(64))
     user_agent: Mapped[str | None] = mapped_column(String(512))
-    timestamp: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+    timestamp: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), primary_key=True)
 
 
 class SystemSetting(Base):
@@ -524,6 +538,7 @@ class SystemSetting(Base):
 
 
 __all__ = [
+    "EmailEventKey",
     "ApiKey",
     "AuditLog",
     "Campaign",

@@ -129,8 +129,8 @@ Phases follow `ARCHITECTURE.md §62 Development Phases`, plus a Phase 0 for setu
 | P3-08 | Cursor-based pagination across all list endpoints | DS-09 | ✅ | 2026-09-29 | |
 | P3-09 | Metrics endpoint (Prometheus) for backend & workers | DS-15 | ✅ | 2026-09-29 | Backend `/metrics`; worker metrics arrive through heartbeats |
 | P3-10 | Load test: 10k jobs, 100k / 500k / 1M recipients | DS-15 | 🔄 | 2026-09-29 | `tests/load/run_load.py` + results in `docs/PERFORMANCE.md` (up to 60k recipients, 1–3 workers, simulated latency). **Remaining:** 500k–1M run on separate machines |
-| P3-11 | Table partitioning for email_events / heartbeats / health logs / audit logs | DS-03 | ⬜ | | |
-| P3-12 | Retention/cleanup jobs for heartbeats, health logs, expired refresh tokens | DS-03 | ⬜ | | Found during implementation; these tables grow without limit today |
+| P3-11 | Table partitioning for email_events / heartbeats / health logs / audit logs | DS-03, DS-18, ADR-013 | ✅ | 2026-09-29 | Migration 0005: monthly (events, audit, health) and daily (heartbeats) range partitions + DEFAULT partition; event dedupe moved to `email_event_keys` |
+| P3-12 | Retention/cleanup jobs for heartbeats, health logs, expired refresh tokens | DS-18 | ✅ | 2026-09-29 | Hourly maintenance: creates partitions ahead (moving any default-partition rows), drops expired partitions per `retention_*_days` settings, prunes refresh tokens and dedupe keys |
 | P3-13 | Worker throughput: compiled messages, SMTP connection reuse across jobs, uvloop | DS-08 | ✅ | 2026-09-29 | 396 → 2,307 msgs/s per worker (docs/PERFORMANCE.md) |
 | P3-14 | Provider `max_connections` + immediate scheduler wake-up on start/resume | DS-06, DS-05 | ✅ | 2026-09-29 | Migration 0002; start latency ≈1 s |
 | P3-15 | SMTP PIPELINING (RFC 2920) client | DS-08 | ⬜ | | Next speed step for real (high-latency) providers |

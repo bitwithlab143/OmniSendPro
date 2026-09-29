@@ -12,13 +12,15 @@ from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.security import unsign_value
-from app.models import Campaign, CampaignRecipient, EmailEvent
+from app.models import Campaign, CampaignRecipient, EmailEvent, EmailEventKey
 from app.models.enums import EventType, RecipientStatus, SuppressionType
 from app.services import health, suppression
 from app.services.jobs import UNSUBSCRIBE_PURPOSE
 from app.services.recipients import normalize_email
 
 SUPPORTED = {"delivered", "bounced", "complained", "deferred", "unsubscribed"}
+# Event types de-duplicated per (provider, message, type) through email_event_keys (ADR-013).
+DEDUPED = {EventType.DELIVERED, EventType.BOUNCED, EventType.COMPLAINED, EventType.UNSUBSCRIBED}
 # Final statuses a later event may not downgrade.
 _RANK = {
     RecipientStatus.QUEUED: 0, RecipientStatus.DEFERRED: 1, RecipientStatus.SENT: 2, RecipientStatus.FAILED: 2,
@@ -81,6 +83,18 @@ async def ingest(db: AsyncSession, provider_id: uuid.UUID, events: list[dict[str
             stored_type = EventType.DEFERRED  # soft bounce: informational only
 
         mid = recipient.provider_message_id
+        if mid and stored_type in DEDUPED:
+            fresh = (
+                await db.execute(
+                    insert(EmailEventKey)
+                    .values(provider_id=provider_id, provider_message_id=mid, event_type=stored_type.value)
+                    .on_conflict_do_nothing()
+                    .returning(EmailEventKey.event_type)
+                )
+            ).scalar_one_or_none()
+            if fresh is None:
+                result.duplicates += 1
+                continue
         inserted = (
             await db.execute(
                 insert(EmailEvent)
@@ -94,13 +108,9 @@ async def ingest(db: AsyncSession, provider_id: uuid.UUID, events: list[dict[str
                     error_code=(str(ev.get("error_code"))[:64] if ev.get("error_code") else None),
                     error_message=(str(ev.get("error_message"))[:512] if ev.get("error_message") else None),
                 )
-                .on_conflict_do_nothing()
                 .returning(EmailEvent.id)
             )
-        ).scalar_one_or_none()
-        if inserted is None:
-            result.duplicates += 1
-            continue
+        ).scalar_one()
         result.accepted += 1
         await _apply(db, campaign, recipient, stored_type, inserted)
     await db.commit()

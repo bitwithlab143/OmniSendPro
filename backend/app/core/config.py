@@ -42,6 +42,7 @@ class Settings(BaseSettings):
     run_scheduler: bool = Field(default=True, alias="RUN_SCHEDULER")
     scheduler_interval_seconds: float = Field(default=5.0, alias="SCHEDULER_INTERVAL_SECONDS")
     health_interval_seconds: float = Field(default=60.0, alias="HEALTH_INTERVAL_SECONDS")
+    maintenance_interval_seconds: float = Field(default=3600.0, alias="MAINTENANCE_INTERVAL_SECONDS")
 
     bootstrap_admin_email: str | None = Field(default=None, alias="BOOTSTRAP_ADMIN_EMAIL")
     bootstrap_admin_password: str | None = Field(default=None, alias="BOOTSTRAP_ADMIN_PASSWORD")
