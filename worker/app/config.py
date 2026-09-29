@@ -15,6 +15,15 @@ def _int(name: str, default: int) -> int:
     return int(value) if value else default
 
 
+def _env_or_file(name: str) -> str | None:
+    """<NAME> or the contents of the file named by <NAME>_FILE (Docker/Kubernetes secrets)."""
+    value = os.environ.get(name)
+    if value:
+        return value
+    path = os.environ.get(f"{name}_FILE")
+    return Path(path).read_text(encoding="utf-8").strip() if path else None
+
+
 def _credential() -> str:
     path = os.environ.get("WORKER_CREDENTIAL_FILE")
     if path:
@@ -35,6 +44,8 @@ class WorkerConfig:
     max_concurrent_jobs: int | None = None
     smtp_connections_per_job: int = 4
     redis_url: str | None = None
+    redis_sentinels: str | None = None  # "host:port,…" → discover the master through Sentinel
+    redis_sentinel_master: str = "omnisend"
     log_level: str = "INFO"
     hostname: str = field(default_factory=socket.gethostname)
     result_flush_interval: float = 1.0
@@ -58,7 +69,9 @@ class WorkerConfig:
             capacity=_int("WORKER_CAPACITY", 0) or None,
             max_concurrent_jobs=_int("WORKER_MAX_CONCURRENT_JOBS", 0) or None,
             smtp_connections_per_job=_int("SMTP_CONNECTIONS_PER_JOB", 4),
-            redis_url=os.environ.get("REDIS_URL") or None,
+            redis_url=_env_or_file("REDIS_URL"),
+            redis_sentinels=os.environ.get("REDIS_SENTINELS") or None,
+            redis_sentinel_master=os.environ.get("REDIS_SENTINEL_MASTER", "omnisend"),
             log_level=os.environ.get("LOG_LEVEL", "INFO"),
             send_timeout=float(os.environ.get("SMTP_TIMEOUT_SECONDS", "30")),
             verify_tls=os.environ.get("WORKER_API_VERIFY_TLS", "true").lower() != "false",

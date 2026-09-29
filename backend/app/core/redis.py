@@ -1,18 +1,53 @@
-"""Shared Redis client (queue hints, rate limits, locks, live stats — ARCHITECTURE.md §30)."""
+"""Shared Redis client (queue hints, rate limits, locks, live stats — ARCHITECTURE.md §30).
+
+With REDIS_SENTINELS set, the master is discovered through Sentinel and re-discovered after a failover
+(design DS-23, P4-02). Redis holds no job state (ADR-002), so a failover only costs a few seconds of
+rate-limit and live-stats accuracy.
+"""
 
 from __future__ import annotations
 
+from urllib.parse import unquote, urlparse
+
 from redis.asyncio import Redis
+from redis.asyncio.retry import Retry
+from redis.asyncio.sentinel import Sentinel
+from redis.backoff import ExponentialBackoff
+from redis.exceptions import ConnectionError as RedisConnectionError
+from redis.exceptions import ReadOnlyError
+from redis.exceptions import TimeoutError as RedisTimeoutError
 
 from app.core.config import get_settings
 
 _client: Redis | None = None
 
 
+def sentinel_client(sentinels: str, master: str, url: str, **kwargs: object) -> Redis:
+    """Master client discovered through Sentinel; credentials and DB come from ``url``."""
+    parsed = urlparse(url)
+    hosts = []
+    for part in sentinels.split(","):
+        host, _, port = part.strip().rpartition(":")
+        hosts.append((host or part.strip(), int(port or 26379)))
+    db = int((parsed.path or "/0").lstrip("/") or 0)
+    auth = {"username": unquote(parsed.username) if parsed.username else None,
+            "password": unquote(parsed.password) if parsed.password else None}
+    retry = Retry(ExponentialBackoff(cap=2.0, base=0.1), retries=8)
+    sentinel = Sentinel(hosts, socket_timeout=2.0, sentinel_kwargs={"socket_timeout": 2.0})
+    return sentinel.master_for(master, db=db, retry=retry,
+                               retry_on_error=[RedisConnectionError, RedisTimeoutError, ReadOnlyError],
+                               **auth, **kwargs)  # type: ignore[arg-type]
+
+
 def get_redis() -> Redis:
     global _client
     if _client is None:
-        _client = Redis.from_url(get_settings().redis_url, decode_responses=True, health_check_interval=30)
+        s = get_settings()
+        if s.redis_sentinels:
+            _client = sentinel_client(s.redis_sentinels, s.redis_sentinel_master, s.redis_url,
+                                      decode_responses=True, health_check_interval=30)
+        else:
+            _client = Redis.from_url(s.redis_url, decode_responses=True, health_check_interval=30)
     return _client
 
 

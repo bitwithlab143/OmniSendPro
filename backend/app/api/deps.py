@@ -16,13 +16,15 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.core.errors import ApiError, forbidden, unauthorized
 from app.core.rbac import permissions_for
 from app.core.security import USER_AUDIENCE, WORKER_AUDIENCE, decode_token, session_version
-from app.db.session import get_db
+from app.db.session import get_db, get_read_db
 from app.models import ApiKey, User, Worker
 from app.models.enums import ADMIN_PANEL_ROLES, RoleName, UserStatus
 from app.services import api_keys
 from app.services.audit import RequestContext
 
 DB = Annotated[AsyncSession, Depends(get_db)]
+# Read-only report queries; served by the replica when DATABASE_READ_URL is set (design DS-23).
+ReadDB = Annotated[AsyncSession, Depends(get_read_db)]
 
 _bearer = HTTPBearer(auto_error=False)
 

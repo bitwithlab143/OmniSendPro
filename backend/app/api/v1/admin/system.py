@@ -11,7 +11,7 @@ from fastapi.responses import StreamingResponse
 from sqlalchemy import delete, select
 
 from app.api import sse
-from app.api.deps import DB, Ctx, Principal, require
+from app.api.deps import DB, Ctx, Principal, ReadDB, require
 from app.core.errors import bad_request, not_found
 from app.core.pagination import Page, like_escape, paginate
 from app.models import AuditLog, Suppression, SystemSetting, User
@@ -52,7 +52,7 @@ async def dashboard_stream(request: Request, db: DB, _: Reports) -> StreamingRes
 
 
 @router.get("/reports/summary")
-async def report_summary(db: DB, _: Reports, days: int = Query(default=7, ge=1, le=366),
+async def report_summary(db: ReadDB, _: Reports, days: int = Query(default=7, ge=1, le=366),
                          since: datetime | None = None, until: datetime | None = None) -> dict[str, Any]:
     since, until = _range(days, since, until)
     totals = await reports.event_counts(db, since, until)
@@ -71,7 +71,7 @@ async def report_summary(db: DB, _: Reports, days: int = Query(default=7, ge=1, 
 
 
 @router.get("/reports/breakdown")
-async def report_breakdown(db: DB, _: Reports, group: Literal["user", "provider"] = "user",
+async def report_breakdown(db: ReadDB, _: Reports, group: Literal["user", "provider"] = "user",
                            days: int = Query(default=7, ge=1, le=366),
                            since: datetime | None = None, until: datetime | None = None) -> dict[str, Any]:
     since, until = _range(days, since, until)

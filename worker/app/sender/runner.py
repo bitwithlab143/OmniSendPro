@@ -67,7 +67,7 @@ class JobRunner:
             return Unlimited()
         local = LocalBucket(rate)
         if self.redis is not None:
-            return RedisBucket(self.redis, f"ratelimit:provider:{self.job['provider']['id']}", rate, local)
+            return RedisBucket(self.redis, f"rl:provider:{self.job['provider']['id']}", rate, local)
         return local
 
     async def _lease_loop(self) -> None:

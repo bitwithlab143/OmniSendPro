@@ -14,7 +14,7 @@ from fastapi.responses import StreamingResponse
 from sqlalchemy import select
 
 from app.api import sse
-from app.api.deps import DB, Ctx, Principal, require_user
+from app.api.deps import DB, Ctx, Principal, ReadDB, require_user
 from app.api.v1 import campaign_common as common
 from app.api.v1.auth import me_response
 from app.core.errors import bad_request, not_found
@@ -312,12 +312,12 @@ async def campaign_stream(campaign_id: uuid.UUID, request: Request, db: DB, me: 
 
 
 @router.get("/campaigns/{campaign_id}/report")
-async def campaign_report(campaign_id: uuid.UUID, db: DB, me: ReportsRead) -> dict[str, Any]:
+async def campaign_report(campaign_id: uuid.UUID, db: ReadDB, me: ReportsRead) -> dict[str, Any]:
     return await reports.campaign_report(db, await common.load(db, campaign_id, owner=me.id))
 
 
 @router.get("/campaigns/{campaign_id}/report.csv")
-async def campaign_report_csv(campaign_id: uuid.UUID, db: DB, me: ReportsRead) -> StreamingResponse:
+async def campaign_report_csv(campaign_id: uuid.UUID, db: ReadDB, me: ReportsRead) -> StreamingResponse:
     return common.recipients_csv(db, await common.load(db, campaign_id, owner=me.id))
 
 
@@ -337,7 +337,7 @@ async def my_jobs(db: DB, me: Read, campaign_id: uuid.UUID | None = None, status
 
 
 @router.get("/reports")
-async def my_reports(db: DB, me: ReportsRead, days: int = Query(default=7, ge=1, le=90)) -> dict[str, Any]:
+async def my_reports(db: ReadDB, me: ReportsRead, days: int = Query(default=7, ge=1, le=90)) -> dict[str, Any]:
     until = datetime.now(UTC)
     since = until - timedelta(days=days)
     totals = await reports.event_counts(db, since, until, user_id=me.id)

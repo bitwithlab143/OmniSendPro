@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import base64
 import io
 
 import pytest
@@ -106,3 +107,18 @@ def test_csv_row_crossing_sample_boundary_is_not_split() -> None:
     rows = [f"user{i}@example.org" for i in range(12000)]  # ~250 KB, crosses the 64 KB sample boundary
     data = io.BytesIO(("email\n" + "\n".join(rows) + "\n").encode())
     assert [e for e, _ in _rows(data)] == rows
+
+
+def test_secrets_from_files(tmp_path) -> None:  # noqa: ANN001
+    from app.core.config import Settings, file_secrets
+
+    (tmp_path / "jwt").write_text("j" * 40 + "\n")
+    (tmp_path / "key").write_text("v1:" + base64.b64encode(b"k" * 32).decode())
+    env = {"JWT_SECRET_FILE": str(tmp_path / "jwt"), "ENCRYPTION_KEY_FILE": str(tmp_path / "key"),
+           "WORKER_JWT_SECRET": "explicit-wins", "WORKER_JWT_SECRET_FILE": str(tmp_path / "jwt")}
+    values = file_secrets(env)
+    assert values == {"JWT_SECRET": "j" * 40, "ENCRYPTION_KEY": "v1:" + base64.b64encode(b"k" * 32).decode()}
+    s = Settings(**values)
+    assert s.jwt_secret == "j" * 40 and s.encryption_keys()["v1"] == b"k" * 32
+    with pytest.raises(ValueError, match="JWT_SECRET_FILE"):
+        file_secrets({"JWT_SECRET_FILE": str(tmp_path / "missing")})

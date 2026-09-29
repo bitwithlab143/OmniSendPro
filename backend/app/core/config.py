@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import base64
+import os
 from functools import lru_cache
+from pathlib import Path
 
 from pydantic import Field, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
@@ -20,7 +22,13 @@ class Settings(BaseSettings):
     database_url: str = Field(
         default="postgresql+asyncpg://omnisend:omnisend@localhost:5432/omnisend", alias="DATABASE_URL"
     )
+    # Optional streaming replica for read-heavy report queries (design DS-23, P4-01). Unset = primary.
+    database_read_url: str | None = Field(default=None, alias="DATABASE_READ_URL")
     redis_url: str = Field(default="redis://localhost:6379/0", alias="REDIS_URL")
+    # Redis HA (design DS-23, P4-02): "host:port,host:port" of Sentinels + the monitored master's name.
+    # REDIS_URL then only supplies credentials and the database number.
+    redis_sentinels: str | None = Field(default=None, alias="REDIS_SENTINELS")
+    redis_sentinel_master: str = Field(default="omnisend", alias="REDIS_SENTINEL_MASTER")
 
     jwt_secret: str = Field(default=_DEV_ONLY + "-jwt-0000000000000000000000", alias="JWT_SECRET")
     worker_jwt_secret: str = Field(default=_DEV_ONLY + "-worker-000000000000000000", alias="WORKER_JWT_SECRET")
@@ -58,9 +66,11 @@ class Settings(BaseSettings):
     bootstrap_admin_email: str | None = Field(default=None, alias="BOOTSTRAP_ADMIN_EMAIL")
     bootstrap_admin_password: str | None = Field(default=None, alias="BOOTSTRAP_ADMIN_PASSWORD")
 
-    @field_validator("database_url")
+    @field_validator("database_url", "database_read_url")
     @classmethod
-    def _async_driver(cls, v: str) -> str:
+    def _async_driver(cls, v: str | None) -> str | None:
+        if not v:
+            return None
         if v.startswith("postgresql://"):
             return v.replace("postgresql://", "postgresql+asyncpg://", 1)
         return v
@@ -111,6 +121,28 @@ class Settings(BaseSettings):
         return keys
 
 
+# Secrets that may be provided as files (Docker/Kubernetes secrets, secret-manager CSI mounts): set
+# e.g. JWT_SECRET_FILE=/run/secrets/jwt_secret instead of JWT_SECRET (design DS-23, P4-08).
+FILE_SECRETS = (
+    "DATABASE_URL", "DATABASE_READ_URL", "REDIS_URL", "JWT_SECRET", "WORKER_JWT_SECRET", "ENCRYPTION_KEY",
+    "BOOTSTRAP_ADMIN_PASSWORD", "OBJECT_STORAGE_ACCESS_KEY", "OBJECT_STORAGE_SECRET_KEY",
+)
+
+
+def file_secrets(environ: dict[str, str] | None = None) -> dict[str, str]:
+    """Values for <NAME>_FILE variables. An explicitly set <NAME> wins over its file."""
+    env = os.environ if environ is None else environ
+    out: dict[str, str] = {}
+    for name in FILE_SECRETS:
+        path = env.get(f"{name}_FILE")
+        if path and not env.get(name):
+            try:
+                out[name] = Path(path).read_text(encoding="utf-8").strip()
+            except OSError as exc:
+                raise ValueError(f"{name}_FILE: cannot read {path}: {exc.strerror}") from exc
+    return out
+
+
 @lru_cache
 def get_settings() -> Settings:
-    return Settings()
+    return Settings(**file_secrets())  # type: ignore[arg-type]  # keys are field aliases

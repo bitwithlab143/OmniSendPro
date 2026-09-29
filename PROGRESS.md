@@ -141,7 +141,7 @@ Phases follow `ARCHITECTURE.md §62 Development Phases`, plus a Phase 0 for setu
 | ID | Task | Design ref | Status | Date | Notes |
 |---|---|---|---|---|---|
 | P4-01 | PostgreSQL HA + replication | DS-14 | ⬜ | | |
-| P4-02 | Redis HA / evaluate RabbitMQ or Kafka for durability | DS-05, ADR-002 | ⬜ | | Jobs already survive Redis loss (they live in Postgres) |
+| P4-02 | Redis HA / evaluate RabbitMQ or Kafka for durability | DS-05, DS-23, ADR-002, ADR-014 | ✅ | 2026-09-29 | `REDIS_SENTINELS` in backend and workers; failover test kills the master and the client continues on the promoted replica. Broker not adopted (ADR-014) |
 | P4-03 | Worker autoscaling from queue depth | DS-08 | ⬜ | | `omnisend_queue_depth` metric is available to drive it |
 | P4-04 | Observability stack: Prometheus, Grafana, Loki, OpenTelemetry | DS-15 | 🔄 | | JSON logs, `/metrics`, and an example scrape config and alert rules exist. **Remaining:** deploy the stack, dashboards, tracing |
 | P4-05 | Alerting rules (worker offline, provider degraded, queue backlog, DLQ growth) | DS-15 | 🔄 | | Rules in `infrastructure/monitoring/alerts.yml`. **Remaining:** Alertmanager routing (email/Slack) |
@@ -149,7 +149,7 @@ Phases follow `ARCHITECTURE.md §62 Development Phases`, plus a Phase 0 for setu
 | P4-07 | Queue recovery drill (Redis failure, no silent job loss) | DS-05 | ⬜ | | Design guarantees it; drill not yet run |
 | P4-08 | Production deployment (Nginx, Cloudflare, TLS, secret manager) | DS-14 | 🔄 | | Images, nginx and a production-mode compose run are verified. **Remaining:** real environment |
 | P4-09 | Verify all §68 Architecture Success Criteria | — | 🔄 | | 14 / 17 verified (see below) |
-| P4-10 | Restricted Redis ACL user for workers (rate-limit keys only) | ADR-004 | ⬜ | | Found during implementation |
+| P4-10 | Restricted Redis ACL user for workers (rate-limit keys only) | ADR-004, DS-23 | ✅ | 2026-09-29 | `infrastructure/redis/render-acl.sh`: `worker` user limited to `rl:provider:*` and the bucket's commands; default user off; tested against a real redis-server |
 
 ---
 

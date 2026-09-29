@@ -15,6 +15,7 @@ from app.config import WorkerConfig
 from app.health.metrics import RateMeter, system_usage
 from app.providers.smtp import SmtpPoolRegistry
 from app.queue.client import ApiClient, WorkerDisabledError
+from app.rate_limit import redis_client
 from app.rate_limit.bucket import LocalBucket, Unlimited
 from app.sender.runner import JobRunner
 
@@ -32,7 +33,8 @@ class Worker:
         self.max_jobs = config.max_concurrent_jobs or 4
         self.heartbeat_interval = 10.0
         self.lease_seconds = 120
-        self.redis: Redis | None = Redis.from_url(config.redis_url) if config.redis_url else None
+        self.redis: Redis | None = (redis_client.connect(config.redis_url, config.redis_sentinels,
+                                                         config.redis_sentinel_master) if config.redis_url else None)
         self.worker_bucket: LocalBucket | Unlimited = Unlimited()
         self.provider_factory = provider_factory
         self.pools: SmtpPoolRegistry | None = None

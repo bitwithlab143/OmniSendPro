@@ -10,7 +10,7 @@ from fastapi.responses import StreamingResponse
 from sqlalchemy import select
 
 from app.api import sse
-from app.api.deps import DB, Ctx, Principal, require
+from app.api.deps import DB, Ctx, Principal, ReadDB, require
 from app.api.v1 import campaign_common as common
 from app.core.errors import ApiError, not_found
 from app.core.pagination import Page, like_escape, paginate
@@ -160,12 +160,12 @@ async def campaign_stream(campaign_id: uuid.UUID, request: Request, db: DB, _: R
 
 
 @router.get("/{campaign_id}/report")
-async def campaign_report(campaign_id: uuid.UUID, db: DB, _: Read) -> dict:
+async def campaign_report(campaign_id: uuid.UUID, db: ReadDB, _: Read) -> dict:
     return await reports.campaign_report(db, await common.load(db, campaign_id))
 
 
 @router.get("/{campaign_id}/report.csv")
-async def campaign_report_csv(campaign_id: uuid.UUID, db: DB, _: Read) -> StreamingResponse:
+async def campaign_report_csv(campaign_id: uuid.UUID, db: ReadDB, _: Read) -> StreamingResponse:
     return common.recipients_csv(db, await common.load(db, campaign_id))
 
 
