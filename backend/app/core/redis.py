@@ -56,4 +56,5 @@ class Keys:
 
     SCHEDULER_LOCK = "lock:scheduler"
     SCHEDULER_WAKE = "wake:scheduler"
+    PROCESSOR_WAKE = "wake:processor"
     HEALTH_LOCK = "lock:provider-health"

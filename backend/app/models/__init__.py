@@ -18,6 +18,7 @@ from sqlalchemy import (
     Identity,
     Index,
     Integer,
+    LargeBinary,
     Sequence,
     String,
     Table,
@@ -481,6 +482,27 @@ class EmailEventKey(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), index=True)
 
 
+class EventInbox(Base):
+    """Validated provider reports waiting for the event processor (design DS-19, P3-06)."""
+
+    __tablename__ = "event_inbox"
+    __table_args__ = (
+        Index("ix_event_inbox_due", "next_attempt_at", postgresql_where=text("processed_at IS NULL")),
+        Index("ix_event_inbox_processed_at", "processed_at"),
+    )
+    id: Mapped[int] = mapped_column(BigInteger, Identity(), primary_key=True)
+    provider_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("providers.id", ondelete="CASCADE"))
+    kind: Mapped[str] = mapped_column(String(8))  # json | raw
+    events: Mapped[list[dict[str, Any]] | None] = mapped_column(JSONB)
+    raw: Mapped[bytes | None] = mapped_column(LargeBinary)
+    received_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+    attempts: Mapped[int] = mapped_column(Integer, default=0, server_default=text("0"))
+    next_attempt_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+    processed_at: Mapped[datetime | None] = ts()
+    last_error: Mapped[str | None] = mapped_column(String(512))
+    result: Mapped[dict[str, Any] | None] = mapped_column(JSONB)
+
+
 # --------------------------------------------------------------------------- compliance & system
 
 
@@ -538,6 +560,7 @@ class SystemSetting(Base):
 
 
 __all__ = [
+    "EventInbox",
     "EmailEventKey",
     "ApiKey",
     "AuditLog",

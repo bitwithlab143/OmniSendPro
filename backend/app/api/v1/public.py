@@ -1,6 +1,8 @@
 """Public endpoints: provider delivery webhooks and recipient unsubscribe (DS-05, DS-07, DS-09).
 
-Both are unauthenticated by design and protected by signatures (HMAC) instead.
+Both are unauthenticated by design and protected by signatures (HMAC) instead. Provider reports are
+authenticated and validated here, then queued in the event inbox for the processor (DS-19): the receiver
+answers 202 in milliseconds regardless of how busy the database is.
 """
 
 from __future__ import annotations
@@ -10,7 +12,7 @@ import json
 import uuid
 
 from fastapi import APIRouter, Request
-from fastapi.responses import HTMLResponse
+from fastapi.responses import HTMLResponse, JSONResponse
 from pydantic import ValidationError
 
 from app.api.deps import DB, client_ip
@@ -19,15 +21,15 @@ from app.core.redis import get_redis
 from app.core.security import decrypt_secret, verify_webhook_signature
 from app.models import Provider
 from app.schemas.domain import WebhookPayload
-from app.services import events, inbound
+from app.services import events, inbound, processor
 
 router = APIRouter(tags=["public"])
 
 MAX_WEBHOOK_BYTES = 1024 * 1024
 
 
-@router.post("/hooks/providers/{provider_id}")
-async def provider_webhook(provider_id: uuid.UUID, request: Request, db: DB) -> dict[str, int]:
+@router.post("/hooks/providers/{provider_id}", status_code=202)
+async def provider_webhook(provider_id: uuid.UUID, request: Request, db: DB) -> JSONResponse:
     provider = await db.get(Provider, provider_id)
     if provider is None or not provider.webhook_secret_encrypted:
         raise ApiError(404, "not_found", "Unknown webhook endpoint")
@@ -45,13 +47,20 @@ async def provider_webhook(provider_id: uuid.UUID, request: Request, db: DB) -> 
         payload = WebhookPayload.model_validate(json.loads(body))
     except (ValueError, ValidationError) as exc:
         raise ApiError(422, "invalid_payload", "Malformed webhook payload") from exc
-    result = await events.ingest(db, provider.id, [e.model_dump() for e in payload.events])
-    return {"accepted": result.accepted, "duplicates": result.duplicates, "unknown": result.unknown,
-            "rejected": len(result.errors)}
+    valid, rejected = [], 0
+    for e in payload.events:
+        ev = e.model_dump(mode="json")
+        if str(ev.get("type", "")).lower() in events.SUPPORTED and ev.get("provider_message_id"):
+            valid.append(ev)
+        else:
+            rejected += 1
+    if valid:
+        await processor.enqueue(db, provider.id, events_=valid)
+    return JSONResponse({"queued": len(valid), "rejected": rejected}, status_code=202)
 
 
-@router.post("/hooks/providers/{provider_id}/inbound")
-async def provider_inbound_message(provider_id: uuid.UUID, request: Request, db: DB) -> dict[str, object]:
+@router.post("/hooks/providers/{provider_id}/inbound", status_code=202)
+async def provider_inbound_message(provider_id: uuid.UUID, request: Request, db: DB) -> JSONResponse:
     """Raw bounce (DSN) / complaint (ARF) email, e.g. piped from an MTA (design DS-16).
 
     Body is the raw RFC 5322 message; signed like delivery webhooks (HMAC over "<timestamp>.<body>").
@@ -69,8 +78,8 @@ async def provider_inbound_message(provider_id: uuid.UUID, request: Request, db:
         request.headers.get("x-omnisend-signature", ""),
     ):
         raise ApiError(401, "invalid_signature", "Invalid signature")
-    result = await inbound.process_raw(db, provider, body)
-    return result.as_dict()
+    await processor.enqueue(db, provider.id, raw=body)
+    return JSONResponse({"queued": 1}, status_code=202)
 
 
 _PAGE = """<!doctype html><html lang="en"><head><meta charset="utf-8">

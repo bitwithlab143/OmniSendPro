@@ -21,7 +21,7 @@ from app.schemas.domain import (
     WorkerOut,
     WorkerUpdate,
 )
-from app.services import audit
+from app.services import audit, processor
 from app.services import jobs as job_service
 from app.services import workers as worker_service
 
@@ -132,7 +132,8 @@ async def queue_summary(db: DB, _: QRead) -> dict:
         await db.execute(select(func.min(Job.available_at)).where(Job.status.in_([JobStatus.PENDING, JobStatus.RETRY]),
                                                                     Job.available_at <= func.now()))
     ).scalar_one_or_none()
-    return {"by_status": summary, "oldest_ready_at": oldest.isoformat() if oldest else None}
+    return {"by_status": summary, "oldest_ready_at": oldest.isoformat() if oldest else None,
+            "event_inbox": await processor.inbox_counts(db)}
 
 
 @router.get("/queues/jobs", response_model=Page[JobOut])

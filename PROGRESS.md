@@ -120,11 +120,11 @@ Phases follow `ARCHITECTURE.md §62 Development Phases`, plus a Phase 0 for setu
 | ID | Task | Design ref | Status | Date | Notes |
 |---|---|---|---|---|---|
 | P3-01 | Multiple workers with capacity-aware scheduling | DS-05, DS-08 | ✅ | 2026-09-29 | Pull-based: workers claim only when they have capacity; multi-worker exclusivity is tested |
-| P3-02 | Dedicated scheduler service (delayed jobs, retries, balancing) | DS-05 | 🔄 | | Scheduler exists (Redis leader lock, runs in the API). **Remaining:** separate deployable process |
+| P3-02 | Dedicated scheduler service (delayed jobs, retries, balancing) | DS-05, DS-19 | ✅ | 2026-09-29 | `python -m app.runner [scheduler] [processor]`; compose service `runner`, API runs with `RUN_SCHEDULER=false`; e2e test runs this topology |
 | P3-03 | Real-time dashboard via SSE/WebSocket | DS-12, ADR-009 | ⬜ | | Dashboards currently poll every 2–5 s |
 | P3-04 | Presigned uploads to object storage (S3/R2/MinIO) | DS-07 | ⬜ | | |
 | P3-05 | Validation worker for large recipient files (streaming, chunked) | DS-07 | ⬜ | | Parsing is streamed/chunked today but runs inside the API |
-| P3-06 | Advanced event processing pipeline (receiver → validator → processor) | DS-05 | 🔄 | | Receiver + signature/schema validation + processor exist in the API. **Remaining:** async queue and separate processor |
+| P3-06 | Advanced event processing pipeline (receiver → validator → processor) | DS-05, DS-19 | ✅ | 2026-09-29 | Webhooks/raw reports are validated and queued in `event_inbox` (202); leased, retried with backoff, dead after 10 attempts; inbox depth in `/admin/queues` and `/metrics` |
 | P3-07 | Advanced reports: bounce, complaint, per-user, per-provider | DS-09 | ✅ | 2026-09-29 | Rates plus per-user and per-provider breakdowns |
 | P3-08 | Cursor-based pagination across all list endpoints | DS-09 | ✅ | 2026-09-29 | |
 | P3-09 | Metrics endpoint (Prometheus) for backend & workers | DS-15 | ✅ | 2026-09-29 | Backend `/metrics`; worker metrics arrive through heartbeats |

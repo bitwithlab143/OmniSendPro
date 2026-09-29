@@ -13,9 +13,9 @@ from httpx import AsyncClient
 
 from app.db.session import sessionmaker
 from app.models import Provider
-from app.services import bounce_mailbox, inbound
+from app.services import bounce_mailbox, inbound, processor
 from tests.conftest import Session, create_provider
-from tests.test_events_and_health import _sent_campaign
+from tests.test_events_and_health import _last_result, _sent_campaign
 
 
 def dsn(message_id: str | None, email: str, action: str = "failed", status: str = "5.1.1",
@@ -119,6 +119,15 @@ def test_parse_unrelated_mail() -> None:
 # --------------------------------------------------------------------------- inbound endpoint
 
 
+async def _deliver(client: AsyncClient, url: str, body: bytes, secret: str) -> dict:
+    """Post a signed raw report, let the processor handle it, return the processing result."""
+    r = await client.post(url, content=body, headers=_sign(secret, body))
+    assert r.status_code == 202, r.text
+    assert r.json() == {"queued": 1}
+    assert await processor.drain() == 1
+    return await _last_result()
+
+
 async def _webhook_secret(client: AsyncClient, admin: Session, provider_id: str) -> str:
     r = await client.post(f"/api/v1/admin/providers/{provider_id}/webhook-secret", headers=admin.headers)
     return r.json()["webhook_secret"]
@@ -132,24 +141,21 @@ async def test_inbound_dsn_and_arf(client: AsyncClient, admin: Session, user: Se
     hard = dsn("msg-0", recipients[0]["email"])
     r = await client.post(url, content=hard, headers={"Content-Type": "message/rfc822"})
     assert r.status_code == 401
-    r = await client.post(url, content=hard, headers=_sign(secret, hard))
-    assert r.status_code == 200, r.text
-    assert r.json() == {"kind": "dsn", "accepted": 1, "duplicates": 0, "unmatched": 0}
-    r = await client.post(url, content=hard, headers=_sign(secret, hard))
-    assert r.json()["duplicates"] == 1
+    assert await _deliver(client, url, hard, secret) == {"kind": "dsn", "accepted": 1, "duplicates": 0, "unmatched": 0}
+    assert (await _deliver(client, url, hard, secret))["duplicates"] == 1
 
     soft = dsn("msg-1", recipients[1]["email"], status="5.2.2")
-    assert (await client.post(url, content=soft, headers=_sign(secret, soft))).json()["accepted"] == 1
+    assert (await _deliver(client, url, soft, secret))["accepted"] == 1
     delayed = dsn("msg-3", recipients[3]["email"], action="delayed", status="4.4.7")
-    assert (await client.post(url, content=delayed, headers=_sign(secret, delayed))).json()["accepted"] == 1
+    assert (await _deliver(client, url, delayed, secret))["accepted"] == 1
     complaint = arf("msg-2", recipients[2]["email"])
-    assert (await client.post(url, content=complaint, headers=_sign(secret, complaint))).json() == {
+    assert (await _deliver(client, url, complaint, secret)) == {
         "kind": "arf", "accepted": 1, "duplicates": 0, "unmatched": 0}
 
     unknown = dsn("<nobody@elsewhere>", "x@example.org")
-    assert (await client.post(url, content=unknown, headers=_sign(secret, unknown))).json()["unmatched"] == 1
+    assert (await _deliver(client, url, unknown, secret))["unmatched"] == 1
     junk = b"Subject: hi\r\n\r\nhello"
-    assert (await client.post(url, content=junk, headers=_sign(secret, junk))).json()["kind"] == "unknown"
+    assert (await _deliver(client, url, junk, secret))["kind"] == "unknown"
 
     stats = (await client.get(f"/api/v1/user/campaigns/{campaign['id']}/stats", headers=user.headers)).json()
     # A soft bounce is stored as a deferral (the address may work later): only the hard bounce counts.
@@ -173,12 +179,10 @@ async def test_inbound_campaign_fallback_and_provider_isolation(
     # Some MTAs drop the Message-ID: fall back to campaign header + recipient address.
     report = dsn(None, recipients[0]["email"], campaign_id=campaign["id"])
     # A different provider must not be able to bounce messages it never sent.
-    r = await client.post(f"/api/v1/hooks/providers/{other['id']}/inbound", content=report,
-                          headers=_sign(other_secret, report))
-    assert r.json() == {"kind": "dsn", "accepted": 0, "duplicates": 0, "unmatched": 1}
-    r = await client.post(f"/api/v1/hooks/providers/{provider['id']}/inbound", content=report,
-                          headers=_sign(secret, report))
-    assert r.json()["accepted"] == 1
+    result = await _deliver(client, f"/api/v1/hooks/providers/{other['id']}/inbound", report, other_secret)
+    assert result == {"kind": "dsn", "accepted": 0, "duplicates": 0, "unmatched": 1}
+    result = await _deliver(client, f"/api/v1/hooks/providers/{provider['id']}/inbound", report, secret)
+    assert result["accepted"] == 1
     stats = (await client.get(f"/api/v1/user/campaigns/{campaign['id']}/stats", headers=user.headers)).json()
     assert stats["bounced"] == 1
 

@@ -8,9 +8,11 @@ import json
 import time
 
 from httpx import AsyncClient
+from sqlalchemy import select
 
 from app.db.session import sessionmaker
-from app.services import health
+from app.models import EventInbox
+from app.services import health, processor
 from tests.conftest import Session, assign, create_provider, provision_worker, ready_campaign, tick
 
 
@@ -19,6 +21,13 @@ def _sign(secret: str, body: bytes, ts: int | None = None) -> dict[str, str]:
     sig = hmac.new(secret.encode(), f"{ts}.".encode() + body, hashlib.sha256).hexdigest()
     return {"X-OmniSend-Timestamp": str(ts), "X-OmniSend-Signature": f"sha256={sig}",
             "Content-Type": "application/json"}
+
+
+async def _last_result() -> dict:
+    async with sessionmaker()() as db:
+        row = (await db.execute(select(EventInbox).order_by(EventInbox.id.desc()).limit(1))).scalar_one()
+        assert row.processed_at is not None, row.last_error
+        return row.result or {}
 
 
 async def _sent_campaign(client: AsyncClient, admin: Session, user: Session, n: int = 3) -> tuple[dict, dict, list]:
@@ -55,10 +64,13 @@ async def test_webhook_events(client: AsyncClient, admin: Session, user: Session
     r = await client.post(url, content=body, headers=_sign(secret, body, ts=int(time.time()) - 3600))
     assert r.status_code == 401, "stale timestamp must be rejected (replay)"
     r = await client.post(url, content=body, headers=_sign(secret, body))
-    assert r.status_code == 200, r.text
-    assert r.json() == {"accepted": 3, "duplicates": 0, "unknown": 1, "rejected": 0}
+    assert r.status_code == 202, r.text
+    assert r.json() == {"queued": 4, "rejected": 0}
+    assert await processor.drain() == 1
+    assert await _last_result() == {"accepted": 3, "duplicates": 0, "unknown": 1, "rejected": 0}
     r = await client.post(url, content=body, headers=_sign(secret, body))
-    assert r.json()["duplicates"] == 3
+    await processor.drain()
+    assert (await _last_result())["duplicates"] == 3
 
     stats = (await client.get(f"/api/v1/user/campaigns/{campaign['id']}/stats", headers=user.headers)).json()
     # SMTP acceptance counted as delivered before the webhook existed; bounce moves one out of "sent".

@@ -14,12 +14,13 @@ from sqlalchemy import delete, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.db import partitions
-from app.models import EmailEventKey, RefreshToken
+from app.models import EmailEventKey, EventInbox, RefreshToken
 from app.services import settings as settings_service
 
 log = logging.getLogger("omnisend.maintenance")
 
 REFRESH_TOKEN_GRACE = timedelta(days=1)  # keep just-expired tokens so reuse detection still works
+INBOX_RETENTION = timedelta(days=7)  # processed provider reports (the events themselves are kept)
 
 
 async def ensure_partitions(db: AsyncSession, today: date | None = None) -> list[str]:
@@ -72,6 +73,8 @@ async def prune(db: AsyncSession, now: datetime | None = None) -> dict[str, int]
     keys_cutoff = now - timedelta(days=int(cfg["retention_events_days"]))
     res = await db.execute(delete(EmailEventKey).where(EmailEventKey.created_at < keys_cutoff))
     out["event_keys"] = res.rowcount or 0
+    res = await db.execute(delete(EventInbox).where(EventInbox.processed_at < now - INBOX_RETENTION))
+    out["inbox"] = res.rowcount or 0
     await db.commit()
     return out
 

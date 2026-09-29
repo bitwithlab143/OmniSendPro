@@ -1,8 +1,9 @@
 """Black-box end-to-end test of the whole pipeline (ARCHITECTURE.md §1, §63 integration tests):
 
-    uvicorn backend (+ scheduler) ─┐
-    worker process ────────────────┼── PostgreSQL + Redis
-    aiosmtpd sink ◄── SMTP ────────┘
+    uvicorn API (RUN_SCHEDULER=false) ─┐
+    runner (scheduler + processor) ────┼── PostgreSQL + Redis      (production topology, DS-19)
+    worker process ────────────────────┤
+    aiosmtpd sink ◄── SMTP ────────────┘
 
 Run:  .venv/bin/pytest tests/e2e -q
 Env:  E2E_DATABASE_URL (default …/omnisend_e2e), E2E_REDIS_URL (default redis://localhost:6379/14)
@@ -11,6 +12,8 @@ Env:  E2E_DATABASE_URL (default …/omnisend_e2e), E2E_REDIS_URL (default redis:
 from __future__ import annotations
 
 import asyncio
+import hashlib
+import hmac
 import os
 import signal
 import socket
@@ -33,6 +36,15 @@ REDIS_URL = os.environ.get("E2E_REDIS_URL", "redis://localhost:6379/14")
 ADMIN_EMAIL, ADMIN_PASSWORD = "e2e-admin@example.com", "E2e-Admin-Passw0rd!"
 USER_PASSWORD = "E2e-User-Passw0rd!"
 REJECTED = "reject@example.org"
+
+
+def _dsn(message_id: str, email: str) -> bytes:
+    return (
+        'Content-Type: multipart/report; report-type=delivery-status; boundary="B"\r\nMIME-Version: 1.0\r\n\r\n'
+        "--B\r\nContent-Type: message/delivery-status\r\n\r\nReporting-MTA: dns; mx.example\r\n\r\n"
+        f"Final-Recipient: rfc822; {email}\r\nAction: failed\r\nStatus: 5.1.1\r\n\r\n"
+        f"--B\r\nContent-Type: text/rfc822-headers\r\n\r\nMessage-ID: {message_id}\r\n\r\n--B--\r\n"
+    ).encode()
 
 
 def free_port() -> int:
@@ -75,7 +87,7 @@ def _env(**extra: str) -> dict[str, str]:
 
 @pytest.fixture
 def backend():  # noqa: ANN201
-    env = _env(RUN_SCHEDULER="true", SCHEDULER_INTERVAL_SECONDS="0.5", ADMIN_REQUIRE_2FA="true",
+    env = _env(RUN_SCHEDULER="false", SCHEDULER_INTERVAL_SECONDS="0.5", ADMIN_REQUIRE_2FA="true",
                BOOTSTRAP_ADMIN_EMAIL=ADMIN_EMAIL, BOOTSTRAP_ADMIN_PASSWORD=ADMIN_PASSWORD)
     port = free_port()
     env["PUBLIC_BASE_URL"] = f"http://127.0.0.1:{port}"
@@ -106,7 +118,10 @@ def backend():  # noqa: ANN201
     else:
         proc.kill()
         pytest.fail("backend did not start")
+    runner = subprocess.Popen([PY, "-m", "app.runner"], cwd=backend_dir, env=env)  # noqa: S603
     yield base
+    runner.send_signal(signal.SIGTERM)
+    assert runner.wait(timeout=20) == 0, "runner must stop cleanly on SIGTERM"
     proc.send_signal(signal.SIGTERM)
     proc.wait(timeout=20)
 
@@ -199,6 +214,24 @@ async def test_full_pipeline(backend: str, smtp_sink) -> None:  # noqa: ANN001
         # The rejected address was hard-bounced and globally suppressed.
         supp = (await c.get("/api/v1/admin/suppressions", headers=admin, params={"type": "hard_bounce"})).json()
         assert [s["email_normalized"] for s in supp["items"]] == [REJECTED]
+
+        # An asynchronous bounce arrives later as a DSN on the signed inbound endpoint; the runner's
+        # processor applies it (receiver → inbox → processor, DS-19).
+        secret = (await c.post(f"/api/v1/admin/providers/{provider_id}/webhook-secret",
+                               headers=admin)).json()["webhook_secret"]
+        _, raw9 = next(m for m in sink.messages if m[0] == "person9@example.org")
+        dsn = _dsn(message_from_bytes(raw9, policy=policy.default)["Message-ID"], "person9@example.org")
+        ts = str(int(time.time()))
+        sig = hmac.new(secret.encode(), f"{ts}.".encode() + dsn, hashlib.sha256).hexdigest()
+        r = await c.post(f"/api/v1/hooks/providers/{provider_id}/inbound", content=dsn, headers={
+            "X-OmniSend-Timestamp": ts, "X-OmniSend-Signature": f"sha256={sig}", "Content-Type": "message/rfc822"})
+        assert r.status_code == 202
+        for _ in range(40):
+            stats = (await c.get(f"/api/v1/user/campaigns/{cid}/stats", headers=user)).json()
+            if stats["bounced"] == 2:
+                break
+            await asyncio.sleep(0.25)
+        assert stats["bounced"] == 2, stats
 
         # One-click unsubscribe from the delivered message works.
         r = await c.post(unsub.replace(backend, ""), content=b"List-Unsubscribe=One-Click",

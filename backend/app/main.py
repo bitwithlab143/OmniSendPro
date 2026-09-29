@@ -21,8 +21,9 @@ from app.core.redis import close_redis, get_redis
 from app.db.session import dispose_engine, get_engine, sessionmaker
 from app.models import Job, Provider, Worker
 from app.models.enums import JobStatus, ProviderStatus, WorkerStatus
+from app.runner import Processor
 from app.scheduler.loop import Scheduler
-from app.services import bootstrap
+from app.services import bootstrap, processor
 from app.services import jobs as job_service
 
 log = logging.getLogger("omnisend.api")
@@ -45,14 +46,19 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
             await lock_conn.execute(text("SELECT pg_advisory_unlock(:k)"), {"k": BOOTSTRAP_LOCK})
             await lock_conn.commit()
     scheduler: Scheduler | None = None
-    if settings.run_scheduler:
+    processor: Processor | None = None
+    if settings.run_scheduler:  # single-process mode; production runs `python -m app.runner` (DS-19)
         scheduler = Scheduler()
         scheduler.start()
+        processor = Processor()
+        processor.start()
     app.state.scheduler = scheduler
     log.info("api_started", extra={"env": settings.app_env, "version": VERSION})
     try:
         yield
     finally:
+        if processor:
+            await processor.stop()
         if scheduler:
             await scheduler.stop()
         await close_redis()
@@ -170,6 +176,11 @@ def create_app() -> FastAPI:
                 safe = name.replace('"', "'")
                 lines.append(f'omnisend_provider_health{{provider="{safe}",status="{status.value}"}} {score}')
             gauge("omnisend_providers_disabled", sum(1 for p in providers if p[1] == ProviderStatus.DISABLED))
+            inbox = await processor.inbox_counts(db)
+            gauge("omnisend_event_inbox_pending", inbox["pending"], help_="Provider reports waiting for the processor")
+            gauge("omnisend_event_inbox_dead", inbox["dead"], help_="Provider reports that failed every attempt")
+            gauge("omnisend_event_inbox_oldest_seconds", inbox["oldest_seconds"],
+                  help_="Age of the oldest unprocessed provider report")
         gauge("omnisend_sending_rate", await job_service.sending_rate(), help_="Messages sent per second (10s avg)")
         return PlainTextResponse("\n".join(lines) + "\n", media_type="text/plain; version=0.0.4")
 

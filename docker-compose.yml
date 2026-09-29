@@ -66,11 +66,25 @@ services:
   backend:
     image: omnisendpro/backend:local
     restart: unless-stopped
-    environment: *backend-env
+    environment:
+      <<: *backend-env
+      RUN_SCHEDULER: "false"   # background work runs in the `runner` service (design DS-19)
     depends_on:
       migrate: { condition: service_completed_successfully }
       redis: { condition: service_healthy }
     expose: ["8000"]
+
+  # Scheduler (leader-elected) + event/import processor. Scale the processor with
+  #   docker compose up -d --scale runner=2   (only one instance leads the scheduler at a time)
+  runner:
+    image: omnisendpro/backend:local
+    restart: unless-stopped
+    command: ["python", "-m", "app.runner"]
+    stop_grace_period: 30s
+    healthcheck: { disable: true }   # the image's check probes the HTTP API, which the runner does not serve
+    environment: *backend-env
+    depends_on:
+      backend: { condition: service_started }
 
   web:
     build: { context: ., dockerfile: infrastructure/docker/web.Dockerfile }
