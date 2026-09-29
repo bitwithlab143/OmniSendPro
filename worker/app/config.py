@@ -42,6 +42,7 @@ class WorkerConfig:
     idle_poll_max: float = 2.0
     send_timeout: float = 30.0
     verify_tls: bool = True
+    smtp_pipelining: bool = True  # PIPELINING/CHUNKING when the server advertises them (design DS-22)
 
     @classmethod
     def from_env(cls) -> WorkerConfig:
@@ -61,4 +62,5 @@ class WorkerConfig:
             log_level=os.environ.get("LOG_LEVEL", "INFO"),
             send_timeout=float(os.environ.get("SMTP_TIMEOUT_SECONDS", "30")),
             verify_tls=os.environ.get("WORKER_API_VERIFY_TLS", "true").lower() != "false",
+            smtp_pipelining=os.environ.get("WORKER_SMTP_PIPELINING", "true").lower() != "false",
         )

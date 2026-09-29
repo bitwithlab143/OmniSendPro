@@ -131,7 +131,8 @@ async def main(args: argparse.Namespace) -> None:
                 procs.append(subprocess.Popen(  # noqa: S603
                     cmd, cwd=ROOT / "worker",
                     env=env(WORKER_API_URL=base, WORKER_ID=f"load-{i}", WORKER_CREDENTIAL=cred,
-                            SMTP_CONNECTIONS_PER_JOB=str(args.connections), LOG_LEVEL="WARNING")))
+                            SMTP_CONNECTIONS_PER_JOB=str(args.connections), LOG_LEVEL="WARNING",
+                            WORKER_SMTP_PIPELINING="true" if args.pipelining == "on" else "false")))
             first_sent_at = None
             last = 0
             samples = []
@@ -180,6 +181,8 @@ if __name__ == "__main__":
                     help="use tests/load/fast_sink.py with N processes (0 = single-process aiosmtpd)")
     ap.add_argument("--latency-ms", type=float, default=0.0,
                     help="simulated provider round-trip per SMTP reply (fast sink only), e.g. 25")
+    ap.add_argument("--pipelining", choices=("on", "off"), default="on",
+                    help="worker SMTP PIPELINING/CHUNKING (the fast sink advertises both)")
     ap.add_argument("--scheduler-interval", type=float, default=5.0, help="production default is 5 s")
     ap.add_argument("--profile", default="", help="write a py-spy folded profile of worker 0 to this path")
     asyncio.run(main(ap.parse_args()))

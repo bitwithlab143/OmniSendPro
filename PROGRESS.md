@@ -133,7 +133,7 @@ Phases follow `ARCHITECTURE.md §62 Development Phases`, plus a Phase 0 for setu
 | P3-12 | Retention/cleanup jobs for heartbeats, health logs, expired refresh tokens | DS-18 | ✅ | 2026-09-29 | Hourly maintenance: creates partitions ahead (moving any default-partition rows), drops expired partitions per `retention_*_days` settings, prunes refresh tokens and dedupe keys |
 | P3-13 | Worker throughput: compiled messages, SMTP connection reuse across jobs, uvloop | DS-08 | ✅ | 2026-09-29 | 396 → 2,307 msgs/s per worker (docs/PERFORMANCE.md) |
 | P3-14 | Provider `max_connections` + immediate scheduler wake-up on start/resume | DS-06, DS-05 | ✅ | 2026-09-29 | Migration 0002; start latency ≈1 s |
-| P3-15 | SMTP PIPELINING (RFC 2920) client | DS-08 | ⬜ | | Next speed step for real (high-latency) providers |
+| P3-15 | SMTP PIPELINING (RFC 2920) client | DS-08, DS-22, ADR-016 | ✅ | 2026-09-29 | Own asyncio SMTP client: PIPELINING+CHUNKING = 1 round trip/message, PIPELINING = 2, else lock-step; `WORKER_SMTP_PIPELINING`. 25 ms RTT, 1 worker × 16 connections: 153 → 590 msgs/s |
 
 ## Phase 4: Production Hardening
 

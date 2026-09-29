@@ -1,7 +1,8 @@
 """SMTP provider with a small connection pool (one message per SMTP transaction).
 
 Connections are reused across messages; a connection that breaks is dropped and re-opened once before
-the error is surfaced to the caller for classification.
+the error is surfaced to the caller for classification. Transactions are pipelined when the server allows
+it (design DS-22, ``smtp_client.SmtpConnection``).
 """
 
 from __future__ import annotations
@@ -16,9 +17,12 @@ from typing import Any
 
 import aiosmtplib
 
+from app.providers.smtp_client import SmtpConnection
+
 
 class SmtpProvider:
-    def __init__(self, config: dict[str, Any], pool_size: int = 4, timeout: float = 30.0) -> None:
+    def __init__(self, config: dict[str, Any], pool_size: int = 4, timeout: float = 30.0,
+                 pipelining: bool = True) -> None:
         self.host = config["host"]
         self.port = int(config["port"])
         self.username = config.get("username")
@@ -26,25 +30,19 @@ class SmtpProvider:
         self.tls_mode = config.get("tls_mode", "starttls")
         self.timeout = timeout
         self.pool_size = max(1, pool_size)
-        self._idle: asyncio.Queue[aiosmtplib.SMTP] = asyncio.Queue()
-        self._all: list[aiosmtplib.SMTP] = []
+        self.pipelining = pipelining
+        self._idle: asyncio.Queue[SmtpConnection] = asyncio.Queue()
+        self._all: list[SmtpConnection] = []
         self._sem = asyncio.Semaphore(self.pool_size)
         self._tls = ssl.create_default_context()
         self.last_used = time.monotonic()
         self.users = 0  # jobs currently using this pool (shared pools only)
 
-    async def _open(self) -> aiosmtplib.SMTP:
-        client = aiosmtplib.SMTP(
-            hostname=self.host,
-            port=self.port,
-            use_tls=self.tls_mode == "ssl",
-            start_tls=True if self.tls_mode == "starttls" else False,
-            tls_context=self._tls,
-            timeout=self.timeout,
-        )
+    async def _open(self) -> SmtpConnection:
+        client = SmtpConnection(self.host, self.port, tls_mode=self.tls_mode, username=self.username,
+                                password=self.password, timeout=self.timeout, pipelining=self.pipelining,
+                                tls_context=self._tls)
         await client.connect()
-        if self.username:
-            await client.login(self.username, self.password or "")
         self._all.append(client)
         return client
 
@@ -60,7 +58,7 @@ class SmtpProvider:
         client = await self._open()
         await self._idle.put(client)
 
-    async def _checkout(self) -> aiosmtplib.SMTP:
+    async def _checkout(self) -> SmtpConnection:
         try:
             client = self._idle.get_nowait()
         except asyncio.QueueEmpty:
@@ -70,34 +68,37 @@ class SmtpProvider:
             return await self._open()
         return client
 
-    def _discard(self, client: aiosmtplib.SMTP) -> None:
+    def _discard(self, client: SmtpConnection) -> None:
         with contextlib.suppress(ValueError):
             self._all.remove(client)
         with contextlib.suppress(Exception):
             client.close()
 
     @staticmethod
-    async def _transmit(client: aiosmtplib.SMTP, message: EmailMessage | bytes, sender: str,
-                        recipient: str) -> tuple[dict[str, Any], str]:
-        if isinstance(message, bytes):
-            # Pre-rendered wire bytes (fast path); aiosmtplib still applies dot-stuffing.
-            return await client.sendmail(sender, [recipient], message)
-        return await client.send_message(message, sender=sender, recipients=[recipient])
+    async def _transmit(client: SmtpConnection, message: EmailMessage | bytes, sender: str,
+                        recipient: str) -> str:
+        if not isinstance(message, bytes):
+            message = message.as_bytes(policy=message.policy.clone(linesep="\r\n"))
+        return await client.send(sender, recipient, message)
 
     async def send(self, message: EmailMessage | bytes, sender: str, recipient: str) -> str | None:
         self.last_used = time.monotonic()
         async with self._sem:
             client = await self._checkout()
             try:
-                errors, response = await self._transmit(client, message, sender, recipient)
+                response = await self._transmit(client, message, sender, recipient)
             except (aiosmtplib.SMTPServerDisconnected, aiosmtplib.SMTPConnectError, ConnectionError):
                 self._discard(client)
                 client = await self._open()  # one reconnect, then let the caller classify
                 try:
-                    errors, response = await self._transmit(client, message, sender, recipient)
+                    response = await self._transmit(client, message, sender, recipient)
                 except BaseException:
                     self._discard(client)
                     raise
+            except ValueError:
+                # Rejected locally before anything was written (e.g. address encoding): connection is clean.
+                await self._idle.put(client)
+                raise
             except aiosmtplib.SMTPResponseException:
                 # The server answered: the connection is still usable after RSET.
                 with contextlib.suppress(Exception):
@@ -108,9 +109,6 @@ class SmtpProvider:
                 self._discard(client)
                 raise
             await self._idle.put(client)
-            if errors:
-                code, text = next(iter(errors.values()))
-                raise aiosmtplib.SMTPRecipientRefused(code, text, recipient)
             return response
 
     async def close(self) -> None:
@@ -128,9 +126,10 @@ class SmtpPoolRegistry:
     configuration including a password fingerprint, so a rotated credential gets a fresh pool.
     """
 
-    def __init__(self, max_connections: int, timeout: float, idle_ttl: float = 60.0) -> None:
+    def __init__(self, max_connections: int, timeout: float, idle_ttl: float = 60.0, pipelining: bool = True) -> None:
         self.max_connections = max(1, max_connections)
         self.timeout = timeout
+        self.pipelining = pipelining
         self.idle_ttl = idle_ttl
         self._pools: dict[tuple[Any, ...], SmtpProvider] = {}
 
@@ -146,7 +145,8 @@ class SmtpPoolRegistry:
         if pool is None:
             # A provider's own connection limit caps the pool shared by every job on this worker.
             size = int(config.get("max_connections") or self.max_connections)
-            pool = self._pools[key] = SmtpProvider(config, pool_size=size, timeout=self.timeout)
+            pool = self._pools[key] = SmtpProvider(config, pool_size=size, timeout=self.timeout,
+                                                   pipelining=self.pipelining)
         pool.users += 1
         pool.last_used = time.monotonic()
         return pool

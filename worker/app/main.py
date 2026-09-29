@@ -68,7 +68,7 @@ class Worker:
         if self.provider_factory is None:
             # Shared per-provider SMTP pools: enough connections for every concurrent job.
             self.pools = SmtpPoolRegistry(self.config.smtp_connections_per_job * self.max_jobs,
-                                          self.config.send_timeout)
+                                          self.config.send_timeout, pipelining=self.config.smtp_pipelining)
         log.info("worker_registered", extra={"max_jobs": self.max_jobs, "capacity": capacity})
         hb = asyncio.create_task(self._heartbeat_loop())
         idle_delay = 0.5

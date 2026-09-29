@@ -49,7 +49,8 @@ class JobRunner:
         self.worker_bucket = worker_bucket
         self.redis = redis
         self.provider_factory = provider_factory or (
-            lambda cfg: SmtpProvider(cfg, pool_size=config.smtp_connections_per_job, timeout=config.send_timeout)
+            lambda cfg: SmtpProvider(cfg, pool_size=config.smtp_connections_per_job, timeout=config.send_timeout,
+                                     pipelining=config.smtp_pipelining)
         )
         self.pools = pools
         self.stop_requested = asyncio.Event()
