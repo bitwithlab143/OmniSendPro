@@ -3,6 +3,7 @@ import {
   BarChart3,
   Cpu,
   FileClock,
+  KeyRound,
   Layers,
   LayoutDashboard,
   LogOut,
@@ -27,6 +28,7 @@ const NAV = [
   { to: "/reports", label: "Reports", icon: BarChart3, perm: "reports.read" },
   { to: "/suppressions", label: "Suppressions", icon: ShieldBan, perm: "suppressions.read" },
   { to: "/audit-logs", label: "Audit logs", icon: FileClock, perm: "audit.read" },
+  { to: "/api-keys", label: "API keys", icon: KeyRound, perm: "users.read" },
   { to: "/settings", label: "Settings", icon: Settings, perm: "settings.read" },
 ];
 

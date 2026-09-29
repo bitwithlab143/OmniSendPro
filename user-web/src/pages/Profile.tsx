@@ -1,4 +1,30 @@
-import { Badge, Button, Card, CardBody, CardHeader, CopyField, DefinitionList, ErrorBanner, Field, Input, PageHeader, errorMessage, fmtDate, useAction, useAuth, type Me } from "@omnisend/web-shared";
+import {
+  ApiKeyTable,
+  Badge,
+  Button,
+  Card,
+  CardBody,
+  CardHeader,
+  CopyField,
+  CreateApiKeyDialog,
+  DefinitionList,
+  ErrorBanner,
+  Field,
+  Input,
+  NewApiKeyDialog,
+  PageHeader,
+  apiKeyBody,
+  errorMessage,
+  fmtDate,
+  useAction,
+  useAuth,
+  useConfirm,
+  type ApiKey,
+  type ApiKeyCreated,
+  type Me,
+} from "@omnisend/web-shared";
+import { useQuery } from "@tanstack/react-query";
+import { KeyRound } from "lucide-react";
 import { QRCodeSVG } from "qrcode.react";
 import { useState, type FormEvent } from "react";
 
@@ -133,6 +159,46 @@ export function ProfilePage() {
           </CardBody>
         </Card>
       </div>
+      <ApiKeysCard />
     </>
+  );
+}
+
+function ApiKeysCard() {
+  const confirm = useConfirm();
+  const [creating, setCreating] = useState(false);
+  const [created, setCreated] = useState<ApiKeyCreated | null>(null);
+  const keys = useQuery({ queryKey: ["api-keys"], queryFn: () => api.get<ApiKey[]>("/user/api-keys") });
+  const create = useAction((body: unknown) => api.post<ApiKeyCreated>("/user/api-keys", body), {
+    invalidate: [["api-keys"]],
+    onSuccess: (k) => {
+      setCreating(false);
+      setCreated(k);
+    },
+  });
+  const revoke = useAction((id: string) => api.del(`/user/api-keys/${id}`), { invalidate: [["api-keys"]], success: "API key revoked" });
+  return (
+    <Card className="mt-6">
+      <CardHeader
+        title="API keys"
+        description="Let your own tools (CRM, scripts) manage campaigns through the API. Keys never have access to your account settings."
+        actions={
+          <Button size="sm" onClick={() => setCreating(true)}>
+            <KeyRound /> Create key
+          </Button>
+        }
+      />
+      {keys.error && <ErrorBanner message={errorMessage(keys.error)} />}
+      <ApiKeyTable
+        keys={keys.data}
+        loading={keys.isLoading}
+        onRevoke={async (k) => {
+          if (await confirm({ title: `Revoke “${k.name}”?`, message: "Integrations using this key stop working immediately.", confirmLabel: "Revoke", danger: true }))
+            revoke.mutate(k.id);
+        }}
+      />
+      {creating && <CreateApiKeyDialog onClose={() => setCreating(false)} pending={create.isPending} onSubmit={(f) => create.mutate(apiKeyBody(f))} />}
+      <NewApiKeyDialog created={created} onClose={() => setCreated(null)} />
+    </Card>
   );
 }

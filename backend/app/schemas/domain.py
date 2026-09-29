@@ -467,3 +467,36 @@ class WebhookEvent(BaseModel):
 
 class WebhookPayload(BaseModel):
     events: list[WebhookEvent] = Field(max_length=1000)
+
+
+# --------------------------------------------------------------------------- API keys (DS-17)
+
+
+class ApiKeyCreate(BaseModel):
+    name: str = Field(min_length=1, max_length=100)
+    scopes: list[str] = Field(min_length=1, max_length=20)
+    expires_in_days: int | None = Field(default=None, ge=1, le=3650)
+
+
+class AdminApiKeyCreate(ApiKeyCreate):
+    user_id: uuid.UUID
+
+
+class ApiKeyOut(ORM):
+    id: uuid.UUID
+    user_id: uuid.UUID
+    username: str | None = None
+    name: str
+    prefix: str
+    scopes: list[str]
+    created_by: uuid.UUID | None
+    created_at: datetime
+    expires_at: datetime | None
+    revoked_at: datetime | None
+    last_used_at: datetime | None
+    last_used_ip: str | None
+    active: bool = True
+
+
+class ApiKeyCreated(ApiKeyOut):
+    key: str

@@ -6,7 +6,7 @@
 > - [`design.md`](./design.md): concrete design decisions, data models, state machines, API contracts, UI screens (the "how").
 
 **Last updated:** 2026-09-29
-**Current phase:** Phase 2 (Reliability & Compliance) is nearly complete; Phase 3 (Scale & Real-time) has started
+**Current phase:** Phase 2 (Reliability & Compliance) is complete; Phase 3 (Scale & Real-time) is in progress
 **Overall status:** 🟢 MVP implemented and tested end to end; performance pass done (≈5× per worker, 17M/hour measured)
 
 ---
@@ -45,7 +45,7 @@ Phases follow `ARCHITECTURE.md §62 Development Phases`, plus a Phase 0 for setu
 |---|---|---|---|
 | **Phase 0**: Foundation & Planning | Understand architecture, resolve gaps, scaffold monorepo, dev environment | ✅ | 12 / 12 |
 | **Phase 1**: MVP | Admin/User login, campaigns, provider management, basic queue, single worker, basic sending & reports | ✅ | 22 / 22 |
-| **Phase 2**: Reliability & Compliance | Batch processing, retries, worker monitoring, provider health, suppression, audit logs | 🔄 | 14 / 15 (P2-15 in progress) |
+| **Phase 2**: Reliability & Compliance | Batch processing, retries, worker monitoring, provider health, suppression, audit logs | ✅ | 15 / 15 |
 | **Phase 3**: Scale & Real-time | Multiple workers, horizontal scaling, real-time dashboard, advanced reports, object storage, event processing | 🔄 | 6 / 15 |
 | **Phase 4**: Production Hardening | HA, DB replication, queue HA, autoscaling, observability, disaster recovery | 🔄 | 0 / 10 (4 partial) |
 
@@ -113,7 +113,7 @@ Phases follow `ARCHITECTURE.md §62 Development Phases`, plus a Phase 0 for setu
 | P2-12 | User quota enforcement (daily/hourly) | DS-05 | ✅ | 2026-09-29 | Atomic reserve/refund in Redis |
 | P2-13 | Campaign pause / resume / cancel | DS-04 | ✅ | 2026-09-29 | |
 | P2-14 | Sender authentication checks (SPF/DKIM/DMARC) surfaced in provider setup | DS-06 | ✅ | 2026-09-29 | |
-| P2-15 | Admin "System → API Keys" (§6) for programmatic access | DS-17, ADR-012 | 🔄 | | Design done (DS-17); implementation in progress |
+| P2-15 | Admin "System → API Keys" (§6) for programmatic access | DS-17, ADR-012 | ✅ | 2026-09-29 | Scoped `osk_` keys for the User API (hash stored, shown once, optional expiry, per-key rate limit, audited). Admin → API keys page and user Profile → API keys |
 
 ## Phase 3: Scale & Real-time
 
@@ -180,12 +180,12 @@ Tick when verified by a test, drill, or measurement (link the evidence).
 
 | Suite | Result |
 |---|---|
-| Backend (`backend/tests`, real Postgres + Redis) | ✅ 71 passed |
+| Backend (`backend/tests`, real Postgres + Redis) | ✅ 75 passed |
 | Worker (`worker/tests`) | ✅ 29 passed |
 | Load test (`tests/load`) | ✅ 60k recipients: 2,307 / 3,734 / 4,803 msgs/s with 1 / 2 / 3 workers |
 | End-to-end (`tests/e2e`: uvicorn + scheduler + worker process + SMTP sink) | ✅ 1 passed (120 deliveries) |
-| Web (`packages/web-shared` vitest) | ✅ 9 passed; both apps typecheck and build |
-| Browser verification (Chromium, dev and production-mode Docker stack) | ✅ admin and user flows; 300 real deliveries through the containers |
+| Web (`packages/web-shared` vitest) | ✅ 11 passed; both apps typecheck and build |
+| Browser verification (Chromium, dev and production-mode Docker stack) | ✅ admin and user flows; 300 real deliveries through the containers; bounce mailbox and API-key screens (desktop + 390 px) |
 
 ---
 
@@ -226,6 +226,8 @@ Short record of decisions that changed scope or design. Full rationale lives in 
 
 Newest first. One line per completed task or significant change.
 
+- **2026-09-29**: API keys (DS-17): `api_keys` table (migration 0004), `osk_` bearer auth on the User API with scopes ∩ role, per-key rate limit, session-only account endpoints, admin *API keys* page and user *Profile → API keys*; shared key table/dialogs in `web-shared`. Failed connection tests / polls now show error toasts. `npm test` no longer fails on the apps without test files. Phase 2 complete. (P2-15)
+
 - **2026-09-29**: Asynchronous bounces and complaints (DS-16): DSN/ARF parser, IMAP bounce mailbox per provider (scheduler-polled, test/poll/remove in the admin UI), signed raw-message endpoint and `forward-bounce.sh`, correlation by Message-ID or campaign + address restricted to the sending provider, SSRF guard and mandatory TLS for IMAP. 17 new tests. Resolves R-07. (P2-10)
 
 - **2026-09-29**: Performance pass. Load-test harness; compiled message rendering (~110× faster per message), SMTP connection reuse across jobs, uvloop, provider *Max connections*, scheduler wake-up on start. 396 → 2,307 msgs/s per worker; 4,803 msgs/s with 3 workers. Fixed two bugs found by load testing: CSV row split at the 64 KB sample boundary, and bootstrap race with several API processes. (P3-10 partial, P3-13, P3-14)
@@ -240,10 +242,9 @@ Newest first. One line per completed task or significant change.
 
 ## Next up (recommended order)
 
-1. **P2-15**: API keys (DS-17).
-2. **P3-15**: SMTP PIPELINING, then the large multi-machine load test (P3-10).
-3. **P3-12 / P3-11**: retention jobs, then partitioning for high-volume tables.
-4. **P3-03**: SSE live updates (replace polling on the monitor and dashboards).
-5. **P3-04 / P3-05**: object-storage uploads and an out-of-API validation worker for very large lists.
-6. **P4-10**: Redis ACL for workers; **P3-02**: dedicated scheduler process.
-7. Phase 4: backups with a restore drill (P4-06), Redis failure drill (P4-07), monitoring deployment (P4-04/05).
+1. **P3-15**: SMTP PIPELINING, then the large multi-machine load test (P3-10).
+2. **P3-12 / P3-11**: retention jobs, then partitioning for high-volume tables.
+3. **P3-03**: SSE live updates (replace polling on the monitor and dashboards).
+4. **P3-04 / P3-05**: object-storage uploads and an out-of-API validation worker for very large lists.
+5. **P4-10**: Redis ACL for workers; **P3-02**: dedicated scheduler process.
+6. Phase 4: backups with a restore drill (P4-06), Redis failure drill (P4-07), monitoring deployment (P4-04/05).

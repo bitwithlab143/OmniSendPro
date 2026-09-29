@@ -2,6 +2,7 @@ import { EmptyState, buttonVariants } from "@omnisend/web-shared";
 import { createBrowserRouter, Link } from "react-router";
 
 import { Layout } from "./Layout";
+import { ApiKeysPage } from "./pages/ApiKeys";
 import { AuditLogsPage } from "./pages/AuditLogs";
 import { CampaignDetailPage } from "./pages/CampaignDetail";
 import { CampaignsPage } from "./pages/Campaigns";
@@ -45,6 +46,7 @@ export const router = createBrowserRouter([
       { path: "reports", element: <ReportsPage /> },
       { path: "suppressions", element: <SuppressionsPage /> },
       { path: "audit-logs", element: <AuditLogsPage /> },
+      { path: "api-keys", element: <ApiKeysPage /> },
       { path: "settings", element: <SettingsPage /> },
       { path: "*", element: <NotFound /> },
     ],

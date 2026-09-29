@@ -16,7 +16,7 @@ from sqlalchemy import select
 from app.api.deps import DB, Ctx, Principal, require_user
 from app.api.v1 import campaign_common as common
 from app.api.v1.auth import me_response
-from app.core.errors import bad_request
+from app.core.errors import bad_request, not_found
 from app.core.pagination import Page, like_escape, paginate
 from app.core.security import (
     decrypt_secret,
@@ -28,10 +28,13 @@ from app.core.security import (
     verify_password,
     verify_totp,
 )
-from app.models import Campaign, CampaignRecipient, Job, Provider, ProviderAssignment
+from app.models import ApiKey, Campaign, CampaignRecipient, Job, Provider, ProviderAssignment
 from app.models.enums import CAMPAIGN_VIEWS, AssignmentStatus, JobStatus, RecipientStatus
 from app.schemas.auth import ChangePasswordRequest, MeResponse, TotpCodeRequest, TotpSetupResponse
 from app.schemas.domain import (
+    ApiKeyCreate,
+    ApiKeyCreated,
+    ApiKeyOut,
     CampaignCreate,
     CampaignDetail,
     CampaignOut,
@@ -44,7 +47,7 @@ from app.schemas.domain import (
     UserProviderOut,
 )
 from app.schemas.users import ProfileUpdate
-from app.services import audit, reports
+from app.services import api_keys, audit, reports
 from app.services import auth as auth_service
 from app.services import campaigns as svc
 from app.services import settings as settings_service
@@ -57,6 +60,8 @@ Start = Annotated[Principal, Depends(require_user("campaigns.start"))]
 Stop = Annotated[Principal, Depends(require_user("campaigns.stop"))]
 ReportsRead = Annotated[Principal, Depends(require_user("reports.read"))]
 ProvidersRead = Annotated[Principal, Depends(require_user("providers.read"))]
+# Profile, password, 2FA and key management: interactive sessions only, never with an API key (DS-17).
+Account = Annotated[Principal, Depends(require_user("campaigns.read", session_only=True))]
 
 
 # --------------------------------------------------------------------------- profile
@@ -68,14 +73,14 @@ async def profile(me: Read) -> MeResponse:
 
 
 @router.patch("/profile", response_model=MeResponse)
-async def update_profile(body: ProfileUpdate, db: DB, me: Read) -> MeResponse:
+async def update_profile(body: ProfileUpdate, db: DB, me: Account) -> MeResponse:
     me.user.full_name = body.full_name
     await db.commit()
     return me_response(me.user)
 
 
 @router.post("/profile/password", status_code=204)
-async def change_password(body: ChangePasswordRequest, db: DB, me: Read, ctx: Ctx) -> None:
+async def change_password(body: ChangePasswordRequest, db: DB, me: Account, ctx: Ctx) -> None:
     if not verify_password(me.user.password_hash, body.current_password):
         raise bad_request("Current password is incorrect", "invalid_password")
     if err := validate_password_strength(body.new_password):
@@ -88,7 +93,7 @@ async def change_password(body: ChangePasswordRequest, db: DB, me: Read, ctx: Ct
 
 
 @router.post("/profile/2fa/setup", response_model=TotpSetupResponse)
-async def totp_setup(db: DB, me: Read) -> TotpSetupResponse:
+async def totp_setup(db: DB, me: Account) -> TotpSetupResponse:
     if me.user.totp_enabled:
         raise bad_request("Two-factor authentication is already enabled", "2fa_enabled")
     secret = new_totp_secret()
@@ -98,7 +103,7 @@ async def totp_setup(db: DB, me: Read) -> TotpSetupResponse:
 
 
 @router.post("/profile/2fa/enable", response_model=MeResponse)
-async def totp_enable(body: TotpCodeRequest, db: DB, me: Read, ctx: Ctx) -> MeResponse:
+async def totp_enable(body: TotpCodeRequest, db: DB, me: Account, ctx: Ctx) -> MeResponse:
     if not me.user.totp_secret_encrypted or not verify_totp(decrypt_secret(me.user.totp_secret_encrypted), body.code):
         raise bad_request("Invalid verification code", "invalid_code")
     me.user.totp_enabled = True
@@ -108,7 +113,7 @@ async def totp_enable(body: TotpCodeRequest, db: DB, me: Read, ctx: Ctx) -> MeRe
 
 
 @router.post("/profile/2fa/disable", response_model=MeResponse)
-async def totp_disable(body: TotpCodeRequest, db: DB, me: Read, ctx: Ctx) -> MeResponse:
+async def totp_disable(body: TotpCodeRequest, db: DB, me: Account, ctx: Ctx) -> MeResponse:
     if not me.user.totp_enabled or not me.user.totp_secret_encrypted:
         raise bad_request("Two-factor authentication is not enabled", "2fa_disabled")
     if not verify_totp(decrypt_secret(me.user.totp_secret_encrypted), body.code):
@@ -118,6 +123,35 @@ async def totp_disable(body: TotpCodeRequest, db: DB, me: Read, ctx: Ctx) -> MeR
     audit.record(db, ctx, "TWO_FACTOR_DISABLED", "user", me.id)
     await db.commit()
     return me_response(me.user)
+
+
+# --------------------------------------------------------------------------- API keys (DS-17)
+
+
+@router.get("/api-keys", response_model=list[ApiKeyOut])
+async def my_api_keys(db: DB, me: Account) -> list[dict[str, Any]]:
+    return [api_keys.serialize(k) for k in await api_keys.list_keys(db, me.id, include_revoked=False)]
+
+
+@router.post("/api-keys", response_model=ApiKeyCreated, status_code=201)
+async def create_api_key(body: ApiKeyCreate, db: DB, me: Account, ctx: Ctx) -> dict[str, Any]:
+    key, token = await api_keys.create(db, me.user, body.name, body.scopes, body.expires_in_days, me.id)
+    audit.record(db, ctx, "API_KEY_CREATED", "api_key", key.id,
+                 new={"user_id": str(me.id), "name": key.name, "prefix": key.prefix, "scopes": key.scopes})
+    await db.commit()
+    return api_keys.serialize(key, token)
+
+
+@router.delete("/api-keys/{key_id}", response_model=ApiKeyOut)
+async def revoke_api_key(key_id: uuid.UUID, db: DB, me: Account, ctx: Ctx) -> dict[str, Any]:
+    key = await db.get(ApiKey, key_id)
+    if key is None or key.user_id != me.id:
+        raise not_found("API key")
+    if await api_keys.revoke(db, key):
+        audit.record(db, ctx, "API_KEY_REVOKED", "api_key", key.id,
+                     new={"user_id": str(me.id), "prefix": key.prefix})
+    await db.commit()
+    return api_keys.serialize(key)
 
 
 # --------------------------------------------------------------------------- dashboard, providers

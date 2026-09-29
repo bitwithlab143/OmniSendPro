@@ -17,8 +17,9 @@ from app.core.errors import ApiError, forbidden, unauthorized
 from app.core.rbac import permissions_for
 from app.core.security import USER_AUDIENCE, WORKER_AUDIENCE, decode_token, session_version
 from app.db.session import get_db
-from app.models import User, Worker
+from app.models import ApiKey, User, Worker
 from app.models.enums import ADMIN_PANEL_ROLES, RoleName, UserStatus
+from app.services import api_keys
 from app.services.audit import RequestContext
 
 DB = Annotated[AsyncSession, Depends(get_db)]
@@ -35,7 +36,8 @@ def client_ip(request: Request) -> str | None:
 class Principal:
     user: User
     permissions: set[str]
-    app: str
+    app: str  # "admin" | "user" (panel sessions) | "api" (API key, design DS-17)
+    api_key: ApiKey | None = None
 
     @property
     def id(self) -> uuid.UUID:
@@ -56,6 +58,11 @@ async def current_principal(
 ) -> Principal:
     if creds is None or creds.scheme.lower() != "bearer":
         raise unauthorized()
+    if api_keys.looks_like_key(creds.credentials):
+        key, permissions = await api_keys.authenticate(db, creds.credentials, client_ip(request))
+        principal = Principal(user=key.user, permissions=permissions, app="api", api_key=key)
+        request.state.principal = principal
+        return principal
     try:
         claims = decode_token(creds.credentials, USER_AUDIENCE)
         user_id = uuid.UUID(claims["sub"])
@@ -74,6 +81,16 @@ async def current_principal(
 CurrentPrincipal = Annotated[Principal, Depends(current_principal)]
 
 
+async def session_principal(principal: CurrentPrincipal) -> Principal:
+    """Interactive panel session only: API keys are refused (e.g. /auth/me, profile and key management)."""
+    if principal.app == "api":
+        raise forbidden("Not available with an API key")
+    return principal
+
+
+SessionPrincipal = Annotated[Principal, Depends(session_principal)]
+
+
 async def admin_principal(principal: CurrentPrincipal) -> Principal:
     if principal.role not in ADMIN_PANEL_ROLES or principal.app != "admin":
         raise forbidden("Admin panel access required")
@@ -81,7 +98,7 @@ async def admin_principal(principal: CurrentPrincipal) -> Principal:
 
 
 async def user_principal(principal: CurrentPrincipal) -> Principal:
-    if principal.role != RoleName.USER or principal.app != "user":
+    if principal.role != RoleName.USER or principal.app not in ("user", "api"):
         raise forbidden("User panel access required")
     return principal
 
@@ -101,8 +118,12 @@ def require(permission: str) -> Callable[..., object]:
     return _dep
 
 
-def require_user(permission: str) -> Callable[..., object]:
+def require_user(permission: str, *, session_only: bool = False) -> Callable[..., object]:
+    """User-API principal holding `permission`; `session_only` refuses API keys (profile, 2FA, keys)."""
+
     async def _dep(principal: UserPrincipal) -> Principal:
+        if session_only and principal.app == "api":
+            raise forbidden("Not available with an API key")
         if not principal.can(permission):
             raise forbidden(f"Missing permission: {permission}")
         return principal

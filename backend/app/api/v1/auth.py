@@ -7,7 +7,7 @@ import uuid
 import jwt
 from fastapi import APIRouter, Request, Response
 
-from app.api.deps import DB, CurrentPrincipal, client_ip
+from app.api.deps import DB, SessionPrincipal, client_ip
 from app.core.config import get_settings
 from app.core.errors import ApiError
 from app.core.rbac import permissions_for
@@ -161,5 +161,5 @@ async def logout(body: RefreshRequest, request: Request, response: Response, db:
 
 
 @router.get("/me", response_model=MeResponse)
-async def me(principal: CurrentPrincipal) -> MeResponse:
+async def me(principal: SessionPrincipal) -> MeResponse:
     return me_response(principal.user)

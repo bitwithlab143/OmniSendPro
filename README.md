@@ -87,7 +87,7 @@ Alternatively create an admin from the CLI: `cd backend && ../.venv/bin/python -
 ## Tests
 
 ```bash
-(cd backend && ../.venv/bin/pytest -q)   # 54 integration + unit tests (real Postgres & Redis)
+(cd backend && ../.venv/bin/pytest -q)   # 75 integration + unit tests (real Postgres & Redis)
 (cd worker  && ../.venv/bin/pytest -q)   # 29 unit tests
 .venv/bin/pytest tests/e2e -q             # full pipeline with a real SMTP sink
 npm run typecheck && npm test && npm run build

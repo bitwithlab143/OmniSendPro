@@ -5,7 +5,7 @@
 > - Work tracking: [`PROGRESS.md`](./PROGRESS.md). Each task there references the `DS-xx` / `ADR-xxx` item it implements.
 
 **Last updated:** 2026-09-29
-**Document version:** 0.4.1
+**Document version:** 0.4.2
 
 ---
 
@@ -48,7 +48,7 @@
 | [DS-14](#ds-14-infrastructure--deployment) | Infrastructure, deployment & DR | Implemented | §35, §37–§40, §46, §65 |
 | [DS-15](#ds-15-observability-metrics--testing) | Observability, metrics & testing | Implemented | §43–§44, §63–§64 |
 | [DS-16](#ds-16-asynchronous-bounces--complaints-dsn--arf) | Asynchronous bounces & complaints (DSN / ARF) | Implemented | §23, §24, P2-10 |
-| [DS-17](#ds-17-api-keys) | API keys | Accepted | §6 (System → API Keys), §32, P2-15 |
+| [DS-17](#ds-17-api-keys) | API keys | Implemented | §6 (System → API Keys), §32, P2-15 |
 
 ---
 
@@ -570,7 +570,7 @@ rendering, no attachments executed).
 
 ## DS-17 API keys
 
-**Status:** Accepted (2026-09-29) — task P2-15.
+**Status:** Implemented (2026-09-29) — task P2-15.
 
 Programmatic access for integrations (CRM, data pipelines) to the **User API** only (ADR-012).
 
@@ -791,8 +791,16 @@ relative to the repository root.
     Messages are fetched with `BODY.PEEK[]` and flagged only after processing; unrecognised mail stays
     unread for a human. A provider can only affect messages sent through it (`campaign.provider_id`).
 
+25. **API keys (DS-17).** Resolved in `current_principal` by the `osk_` prefix; the principal gets
+    `app="api"`, which `admin_principal` rejects and `user_principal` accepts. Account endpoints (profile
+    edit, password, 2FA, key management) and `/auth/me` use a session-only dependency. The per-key limit
+    is a fixed one-minute Redis window. At most 20 active keys per user. Shared UI lives in
+    `packages/web-shared/src/ui/apiKeys.tsx`.
+26. **`useAction({ failed })`.** Operations that report failure in a 200 body (connection tests, mailbox
+    polls) show an error toast instead of a success toast.
+
 ### Not yet implemented (tracked in PROGRESS.md)
-API keys (P2-15), SSE (P3-03), object-storage
+SSE (P3-03), object-storage
 uploads (P3-04/05), a dedicated scheduler and event-processor process (P3-02/06), partitioning and
 retention (P3-11/12), and Phase 4 hardening.
 
@@ -802,6 +810,7 @@ retention (P3-11/12), and Phase 4 hardening.
 
 Newest first.
 
+- **2026-09-29 · v0.4.2**: DS-17 implemented; implementation notes 25–26.
 - **2026-09-29 · v0.4.1**: DS-16 implemented; implementation notes 23–24 (explicit `reports_delivery` flag, bounce-mailbox safety).
 - **2026-09-29 · v0.4.0**: Added DS-16 (DSN/ARF ingestion), DS-17 (API keys), ADR-011, ADR-012 for the Phase 2 remainder.
 - **2026-09-29 · v0.3.0**: Performance pass — implementation notes 18–22 (compiled messages, SMTP pool reuse, provider `max_connections`, scheduler wake-up, bootstrap lock). Measurements in `docs/PERFORMANCE.md`.

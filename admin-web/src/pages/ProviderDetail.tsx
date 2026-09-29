@@ -102,7 +102,8 @@ export function ProviderDetailPage() {
   const inv = { invalidate: [["providers"], ["dashboard"]] };
   const test = useAction(() => api.post<{ ok: boolean; message: string; latency_ms: number | null }>(`/admin/providers/${id}/test`), {
     invalidate: [["providers"]],
-    success: (r) => (r.ok ? `Connection OK${r.latency_ms ? ` (${r.latency_ms} ms)` : ""}` : `Test failed: ${r.message}`),
+    success: (r) => `Connection OK${r.latency_ms ? ` (${r.latency_ms} ms)` : ""}`,
+    failed: (r) => (r.ok ? null : `Test failed: ${r.message}`),
   });
   const toggle = useAction((action: "enable" | "disable") => api.post<Provider>(`/admin/providers/${id}/${action}`), { ...inv, success: (p) => `Provider is now ${p.status}` });
   const rotateWebhook = useAction(() => api.post<WebhookSecret>(`/admin/providers/${id}/webhook-secret`), { invalidate: [["providers"]], onSuccess: setWebhook });
@@ -319,12 +320,13 @@ function BounceCard({ provider: p, writable }: { provider: Provider; writable: b
   const [editing, setEditing] = useState(false);
   const base = `/admin/providers/${p.id}/bounce-mailbox`;
   const test = useAction(() => api.post<{ ok: boolean; message: string }>(`${base}/test`), {
-    success: (r) => (r.ok ? r.message : `Test failed: ${r.message}`),
+    success: (r) => r.message,
+    failed: (r) => (r.ok ? null : `Test failed: ${r.message}`),
   });
   const poll = useAction(() => api.post<PollResult>(`${base}/poll`), {
     invalidate: [["providers"]],
-    success: (r) =>
-      r.error ? `Polling failed: ${r.error}` : `Fetched ${r.fetched} message(s): ${r.accepted} applied, ${r.duplicates} duplicate, ${r.unmatched} unmatched, ${r.unrecognised} left unread`,
+    success: (r) => `Fetched ${r.fetched} message(s): ${r.accepted} applied, ${r.duplicates} duplicate, ${r.unmatched} unmatched, ${r.unrecognised} left unread`,
+    failed: (r) => (r.error ? `Polling failed: ${r.error}` : null),
   });
   const remove = useAction(() => api.del<Provider>(base), { invalidate: [["providers"]], success: "Bounce mailbox removed" });
   const mb = p.bounce_mailbox;

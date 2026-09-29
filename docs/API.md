@@ -9,6 +9,10 @@ and Swagger UI at `/api/docs` in non-production environments; it is the canonica
 - Auth: `Authorization: Bearer <access token>` (15 min). Refresh token is an httpOnly, SameSite=Strict
   cookie scoped to `/api/v1/auth`; refresh/logout also require `X-Requested-With: XMLHttpRequest`.
 - Every mutating admin call is written to the audit log.
+- **API keys** (design DS-17): `Authorization: Bearer osk_<prefix>_<secret>` on `/user/*` only. Effective
+  permissions = key scopes ∩ the owner's role; profile, password, 2FA and key management are refused
+  (403), as are `/auth/*`, `/admin/*` and `/worker/*`. Limited to `api_key_requests_per_minute` per key
+  (Settings, default 600) → `429`. A suspended owner or a revoked/expired key → `401 invalid_api_key`.
 
 ## Auth — `/auth`
 | Method | Path | Notes |
@@ -32,13 +36,18 @@ and Swagger UI at `/api/docs` in non-production environments; it is the canonica
 | Suppressions [`suppressions.*`] | `GET/POST /suppressions`, `DELETE /suppressions/{id}` (complaints cannot be removed) |
 | Settings [`settings.*`] | `GET/PUT /settings` |
 | Audit [`audit.read`] | `GET /audit-logs?action=&resource=&resource_id=` |
+| API keys [`users.*`] | `GET /api-keys?user_id=&include_revoked=`, `GET /api-keys/scopes`, `POST /api-keys` (`{user_id, name, scopes, expires_in_days}`, returns the key once), `DELETE /api-keys/{id}` (revoke) |
 
 ## User — `/user` (always scoped to the caller)
 `GET/PATCH /profile`, `POST /profile/password`, `POST /profile/2fa/setup|enable|disable`,
 `GET /dashboard`, `GET /providers` (assigned only, no host/credentials), `GET /options`,
 `GET/POST /campaigns`, `GET/PATCH /campaigns/{id}`, recipients upload/list/clear,
 `POST /campaigns/{id}/start|pause|resume|cancel`, `GET /campaigns/{id}/stats|report|report.csv`,
-`GET /jobs`, `GET /reports?days=`.
+`GET /jobs`, `GET /reports?days=`, `GET/POST /api-keys`, `DELETE /api-keys/{id}` (panel session only).
+
+```bash
+curl -H "Authorization: Bearer $OMNISEND_API_KEY" https://panel.example.com/api/v1/user/campaigns
+```
 
 Starting a campaign requires `{"consent_confirmed": true}` and passes the DS-04 guards (ready,
 provider assigned & healthy, From domain matches the provider, per-campaign recipient limit).
