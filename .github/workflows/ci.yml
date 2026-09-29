@@ -1,0 +1,104 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+env:
+  PYTHON_VERSION: "3.11"
+  NODE_VERSION: "22"
+
+jobs:
+  backend:
+    name: Backend (lint, migrations, tests)
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env: { POSTGRES_USER: omnisend, POSTGRES_PASSWORD: omnisend, POSTGRES_DB: omnisend_test }
+        ports: ["5432:5432"]
+        options: --health-cmd "pg_isready -U omnisend" --health-interval 5s --health-timeout 5s --health-retries 20
+      redis:
+        image: redis:7-alpine
+        ports: ["6379:6379"]
+        options: --health-cmd "redis-cli ping" --health-interval 5s --health-timeout 3s --health-retries 20
+    defaults: { run: { working-directory: backend } }
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: { python-version: "${{ env.PYTHON_VERSION }}", cache: pip, cache-dependency-path: backend/pyproject.toml }
+      - run: pip install -e ".[dev]"
+      - run: ruff check app migrations tests
+      - name: Migrations are in sync with models
+        env: { DATABASE_URL: "postgresql+asyncpg://omnisend:omnisend@localhost:5432/omnisend_test" }
+        run: alembic upgrade head && alembic check && alembic downgrade base
+      - run: pytest -q
+        env:
+          TEST_DATABASE_URL: postgresql+asyncpg://omnisend:omnisend@localhost:5432/omnisend_test
+          TEST_REDIS_URL: redis://localhost:6379/15
+
+  worker:
+    name: Worker (lint, tests)
+    runs-on: ubuntu-latest
+    defaults: { run: { working-directory: worker } }
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: { python-version: "${{ env.PYTHON_VERSION }}", cache: pip, cache-dependency-path: worker/pyproject.toml }
+      - run: pip install -e ".[dev]"
+      - run: ruff check .
+      - run: pytest -q
+
+  e2e:
+    name: End-to-end pipeline (API + scheduler + worker + SMTP)
+    runs-on: ubuntu-latest
+    needs: [backend, worker]
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env: { POSTGRES_USER: omnisend, POSTGRES_PASSWORD: omnisend, POSTGRES_DB: omnisend_e2e }
+        ports: ["5432:5432"]
+        options: --health-cmd "pg_isready -U omnisend" --health-interval 5s --health-timeout 5s --health-retries 20
+      redis:
+        image: redis:7-alpine
+        ports: ["6379:6379"]
+        options: --health-cmd "redis-cli ping" --health-interval 5s --health-timeout 3s --health-retries 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: { python-version: "${{ env.PYTHON_VERSION }}" }
+      - run: sudo apt-get update -q && sudo apt-get install -yq redis-tools
+      - run: pip install -e "backend[dev]" -e "worker[dev]" pyotp
+      - run: pytest tests/e2e -q
+        env:
+          E2E_DATABASE_URL: postgresql+asyncpg://omnisend:omnisend@localhost:5432/omnisend_e2e
+          E2E_REDIS_URL: redis://localhost:6379/14
+
+  web:
+    name: Web apps (typecheck, tests, build)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with: { node-version: "${{ env.NODE_VERSION }}", cache: npm }
+      - run: npm ci
+      - run: npm run typecheck
+      - run: npm test
+      - run: npm run build
+
+  docker:
+    name: Docker images build
+    runs-on: ubuntu-latest
+    needs: [backend, worker, web]
+    steps:
+      - uses: actions/checkout@v4
+      - run: docker compose config -q
+      - run: docker compose build

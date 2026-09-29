@@ -78,7 +78,7 @@ def test_email_helpers() -> None:
 
 
 def test_csv_parsing_variants() -> None:
-    semi = io.BytesIO("E-mail;Name\na@example.org;Ann\n".encode())
+    semi = io.BytesIO(b"E-mail;Name\na@example.org;Ann\n")
     assert list(_rows(semi)) == [("a@example.org", {"name": "Ann"})]
     headerless = io.BytesIO(b"a@example.org\nb@example.org\n")
     assert [e for e, _ in _rows(headerless)] == ["a@example.org", "b@example.org"]

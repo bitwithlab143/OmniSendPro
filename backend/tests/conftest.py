@@ -35,7 +35,8 @@ from sqlalchemy.ext.asyncio import AsyncSession, create_async_engine  # noqa: E4
 from app.core.redis import close_redis, get_redis  # noqa: E402
 from app.db.session import dispose_engine, sessionmaker  # noqa: E402
 from app.main import create_app  # noqa: E402
-from app.services import bootstrap, settings as settings_service  # noqa: E402
+from app.services import bootstrap  # noqa: E402
+from app.services import settings as settings_service
 
 ADMIN_PASSWORD = "Adm1n-Password!"
 USER_PASSWORD = "Us3r-Password!!"

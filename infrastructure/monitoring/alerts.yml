@@ -1,0 +1,27 @@
+groups:
+  - name: omnisend
+    rules:
+      - alert: NoOnlineWorkers
+        expr: omnisend_workers_online == 0 and omnisend_queue_depth > 0
+        for: 5m
+        labels: { severity: critical }
+        annotations: { summary: "Jobs are queued but no worker is online" }
+      - alert: ProviderDisabled
+        expr: omnisend_providers_disabled > 0
+        for: 1m
+        labels: { severity: warning }
+        annotations: { summary: "At least one provider is DISABLED" }
+      - alert: ProviderUnhealthy
+        expr: omnisend_provider_health < 50
+        for: 10m
+        labels: { severity: warning }
+        annotations: { summary: "Provider {{ $labels.provider }} health below 50" }
+      - alert: DeadLetterGrowing
+        expr: increase(omnisend_jobs{status="dead_letter"}[30m]) > 0
+        labels: { severity: warning }
+        annotations: { summary: "Jobs are being dead-lettered" }
+      - alert: QueueBacklog
+        expr: omnisend_queue_depth > 1000
+        for: 15m
+        labels: { severity: warning }
+        annotations: { summary: "Queue backlog above 1000 jobs for 15 minutes" }

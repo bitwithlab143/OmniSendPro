@@ -1,0 +1,107 @@
+# OmniSendPro — local / single-host deployment (ARCHITECTURE.md §38, design DS-14).
+#
+#   cp .env.example .env            # then set secrets
+#   docker compose up -d --build    # postgres, redis, migrate, backend, web
+#   open http://localhost:8081      # admin  (bootstrap admin from .env)
+#   open http://localhost:8080      # user panel
+#
+# Workers are provisioned in the admin panel; put WORKER_ID / WORKER_CREDENTIAL in .env, then:
+#   docker compose --profile worker up -d worker
+# Local SMTP sink for testing (provider host "mailpit", port 1025, security "None"):
+#   docker compose --profile dev up -d mailpit     # UI on http://localhost:8025
+
+name: omnisendpro
+
+x-backend-env: &backend-env
+  APP_ENV: ${APP_ENV:-development}
+  LOG_LEVEL: ${LOG_LEVEL:-INFO}
+  DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER:-omnisend}:${POSTGRES_PASSWORD:-omnisend}@postgres:5432/${POSTGRES_DB:-omnisend}
+  REDIS_URL: redis://redis:6379/0
+  JWT_SECRET: ${JWT_SECRET:-}
+  WORKER_JWT_SECRET: ${WORKER_JWT_SECRET:-}
+  ENCRYPTION_KEY: ${ENCRYPTION_KEY:-}
+  PUBLIC_BASE_URL: ${PUBLIC_BASE_URL:-http://localhost:8080}
+  CORS_ORIGINS: ${CORS_ORIGINS:-http://localhost:8080,http://localhost:8081}
+  COOKIE_SECURE: ${COOKIE_SECURE:-false}
+  ADMIN_REQUIRE_2FA: ${ADMIN_REQUIRE_2FA:-true}
+  BOOTSTRAP_ADMIN_EMAIL: ${BOOTSTRAP_ADMIN_EMAIL:-}
+  BOOTSTRAP_ADMIN_PASSWORD: ${BOOTSTRAP_ADMIN_PASSWORD:-}
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-omnisend}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-omnisend}
+      POSTGRES_DB: ${POSTGRES_DB:-omnisend}
+    volumes: [postgres-data:/var/lib/postgresql/data]
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER} -d $${POSTGRES_DB}"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+
+  redis:
+    image: redis:7-alpine
+    restart: unless-stopped
+    # AOF persistence so rate-limit/quota state survives restarts (§46). Job state lives in Postgres.
+    command: ["redis-server", "--appendonly", "yes", "--appendfsync", "everysec"]
+    volumes: [redis-data:/data]
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+
+  migrate:
+    build: { context: ., dockerfile: infrastructure/docker/backend.Dockerfile }
+    image: omnisendpro/backend:local
+    command: ["alembic", "upgrade", "head"]
+    environment: *backend-env
+    depends_on:
+      postgres: { condition: service_healthy }
+    restart: "no"
+
+  backend:
+    image: omnisendpro/backend:local
+    restart: unless-stopped
+    environment: *backend-env
+    depends_on:
+      migrate: { condition: service_completed_successfully }
+      redis: { condition: service_healthy }
+    expose: ["8000"]
+
+  web:
+    build: { context: ., dockerfile: infrastructure/docker/web.Dockerfile }
+    image: omnisendpro/web:local
+    restart: unless-stopped
+    depends_on: [backend]
+    ports:
+      - "${USER_PORT:-8080}:8080"
+      - "${ADMIN_PORT:-8081}:8081"
+      - "${WORKER_API_PORT:-8082}:8082"
+
+  worker:
+    profiles: ["worker"]
+    build: { context: ., dockerfile: infrastructure/docker/worker.Dockerfile }
+    image: omnisendpro/worker:local
+    restart: unless-stopped
+    stop_grace_period: 70s
+    environment:
+      WORKER_API_URL: http://backend:8000
+      WORKER_ID: ${WORKER_ID:-}
+      WORKER_CREDENTIAL: ${WORKER_CREDENTIAL:-}
+      REDIS_URL: redis://redis:6379/0
+      LOG_LEVEL: ${LOG_LEVEL:-INFO}
+    depends_on: [backend]
+
+  mailpit:
+    profiles: ["dev"]
+    image: axllent/mailpit:latest
+    ports: ["8025:8025"]
+    expose: ["1025"]
+
+volumes:
+  postgres-data:
+  redis-data:
