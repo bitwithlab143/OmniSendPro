@@ -23,6 +23,8 @@ import {
   useAction,
   useConfirm,
   useToast,
+  TemplateTagsTable,
+  applySampleTags,
   type PresignedPost,
 } from "@omnisend/web-shared";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
@@ -161,12 +163,13 @@ function DetailsStep({ campaign, providers, options, onDone }: { campaign?: Camp
   }
   const sizes = options?.batch_sizes ?? [500, 1000, 5000];
   return (
-    <Card>
+    <div className="grid gap-6 lg:grid-cols-5">
+    <Card className="lg:col-span-3">
       <CardBody>
         <form onSubmit={submit} className="grid gap-5 sm:grid-cols-2">
           {save.error && <div className="sm:col-span-2"><ErrorBanner message={errorMessage(save.error)} /></div>}
           <Field label="Campaign name" className="sm:col-span-2">{(fid) => <Input id={fid} name="name" defaultValue={campaign?.name} required maxLength={200} autoFocus={!campaign} />}</Field>
-          <Field label="Subject" className="sm:col-span-2" hint="Personalise with CSV columns, e.g. Hello {{first_name}}">
+          <Field label="Subject" className="sm:col-span-2" hint="Personalise with CSV columns ({{first_name}}) or tags such as Invoice #INVOICE#">
             {(fid, d) => <Input id={fid} name="subject" defaultValue={campaign?.subject} maxLength={998} aria-describedby={d} />}
           </Field>
           <Field label="Provider">
@@ -205,38 +208,62 @@ function DetailsStep({ campaign, providers, options, onDone }: { campaign?: Camp
         </form>
       </CardBody>
     </Card>
+    <TemplateTagsTable compact className="self-start bg-surface lg:col-span-2" />
+    </div>
   );
 }
 
 function ContentStep({ campaign, onDone, onBack }: { campaign: Campaign; onDone: () => void; onBack: () => void }) {
   const [html, setHtml] = useState(campaign.html_body ?? "<h1>Hello {{first_name}}</h1>\n<p>Write your message here.</p>");
   const [text, setText] = useState(campaign.text_body ?? "");
-  const save = useAction(() => api.patch<Campaign>(`/user/campaigns/${campaign.id}`, { html_body: html || null, text_body: text || null }), {
+  const [messages, setMessages] = useState((campaign.message_list ?? []).join("\n"));
+  const htmlRef = useRef<HTMLTextAreaElement>(null);
+  const messageList = messages.split("\n").map((m) => m.trim()).filter(Boolean);
+  const insertTag = (tag: string) => {
+    // Insert at the cursor of the HTML editor and keep focus there.
+    const el = htmlRef.current;
+    const start = el?.selectionStart ?? html.length;
+    const end = el?.selectionEnd ?? html.length;
+    setHtml(html.slice(0, start) + tag + html.slice(end));
+    requestAnimationFrame(() => {
+      el?.focus();
+      el?.setSelectionRange(start + tag.length, start + tag.length);
+    });
+  };
+  const save = useAction(() => api.patch<Campaign>(`/user/campaigns/${campaign.id}`, { html_body: html || null, text_body: text || null, message_list: messageList }), {
     invalidate: [["campaigns"]],
     success: "Content saved",
     onSuccess: onDone,
   });
-  const preview = html.replace(/\{\{\s*([a-zA-Z0-9_]+)\s*\}\}/g, (_, k: string) => (k === "unsubscribe_url" ? "#" : `[${k}]`));
+  const preview = applySampleTags(
+    html.replace(/\{\{\s*([a-zA-Z0-9_]+)\s*\}\}/g, (_, k: string) => (k === "unsubscribe_url" ? "#" : `[${k}]`)),
+    { messages: messageList, mode: "html" },
+  );
   return (
     <div className="grid gap-6 lg:grid-cols-2">
       <Card>
         <CardBody className="flex flex-col gap-4">
           <Field label="HTML body" hint="An unsubscribe link is added automatically unless you include {{unsubscribe_url}}.">
-            {(fid, d) => <Textarea id={fid} value={html} onChange={(e) => setHtml(e.target.value)} rows={16} className="font-mono text-xs" aria-describedby={d} spellCheck={false} />}
+            {(fid, d) => <Textarea ref={htmlRef} id={fid} value={html} onChange={(e) => setHtml(e.target.value)} rows={16} className="font-mono text-xs" aria-describedby={d} spellCheck={false} />}
           </Field>
           <Field label="Plain-text version" optional hint="Generated from the HTML if left empty.">
             {(fid, d) => <Textarea id={fid} value={text} onChange={(e) => setText(e.target.value)} rows={5} className="font-mono text-xs" aria-describedby={d} />}
+          </Field>
+          <Field label="Messages for #MASSAGE#" optional hint="One per line; each email gets one of them at random.">
+            {(fid, d) => <Textarea id={fid} value={messages} onChange={(e) => setMessages(e.target.value)} rows={3} aria-describedby={d} placeholder={"Hello\nHi\nWelcome"} />}
           </Field>
         </CardBody>
       </Card>
       <Card className="flex flex-col overflow-hidden">
         <div className="border-b border-border px-5 py-3 text-sm">
           <div className="text-fg-muted">Preview</div>
-          <div className="truncate font-medium">{campaign.subject || "(no subject)"}</div>
+          <div className="truncate font-medium">{campaign.subject ? applySampleTags(campaign.subject, { messages: messageList }) : "(no subject)"}</div>
         </div>
         {/* sandbox="" : no scripts, no forms, no same-origin access */}
         <iframe title="Email preview" sandbox="" srcDoc={preview} className="min-h-96 w-full flex-1 bg-white" />
+        <p className="border-t border-border px-5 py-2 text-xs text-fg-muted">Tags show sample values here; every recipient gets their own when sent.</p>
       </Card>
+      <TemplateTagsTable onInsert={insertTag} className="bg-surface lg:col-span-2" />
       <div className="flex justify-between lg:col-span-2">
         <Button variant="secondary" onClick={onBack}>
           <ArrowLeft /> Back

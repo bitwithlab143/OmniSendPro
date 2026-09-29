@@ -5,7 +5,7 @@
 > - Work tracking: [`PROGRESS.md`](./PROGRESS.md). Each task there references the `DS-xx` / `ADR-xxx` item it implements.
 
 **Last updated:** 2026-09-29
-**Document version:** 0.5.0
+**Document version:** 0.6.0
 
 ---
 
@@ -49,12 +49,13 @@
 | [DS-15](#ds-15-observability-metrics--testing) | Observability, metrics & testing | Implemented | §43–§44, §63–§64 |
 | [DS-16](#ds-16-asynchronous-bounces--complaints-dsn--arf) | Asynchronous bounces & complaints (DSN / ARF) | Implemented | §23, §24, P2-10 |
 | [DS-17](#ds-17-api-keys) | API keys | Implemented | §6 (System → API Keys), §32, P2-15 |
-| [DS-18](#ds-18-data-lifecycle-partitioning--retention) | Data lifecycle: partitioning & retention | Accepted | §57, P3-11, P3-12 |
-| [DS-19](#ds-19-background-runtime-scheduler--processor-processes) | Background runtime: scheduler & processor | Accepted | §21, §23, §60–§61, P3-02, P3-06 |
-| [DS-20](#ds-20-real-time-updates-sse) | Real-time updates (SSE) | Accepted | §42, ADR-009, P3-03 |
-| [DS-21](#ds-21-large-recipient-files-object-storage--import-worker) | Large recipient files: object storage & import worker | Accepted | §55, P3-04, P3-05 |
-| [DS-22](#ds-22-smtp-pipelining--chunking) | SMTP pipelining & chunking | Accepted | §20, P3-15 |
+| [DS-18](#ds-18-data-lifecycle-partitioning--retention) | Data lifecycle: partitioning & retention | Implemented | §57, P3-11, P3-12 |
+| [DS-19](#ds-19-background-runtime-scheduler--processor-processes) | Background runtime: scheduler & processor | Implemented | §21, §23, §60–§61, P3-02, P3-06 |
+| [DS-20](#ds-20-real-time-updates-sse) | Real-time updates (SSE) | Implemented | §42, ADR-009, P3-03 |
+| [DS-21](#ds-21-large-recipient-files-object-storage--import-worker) | Large recipient files: object storage & import worker | Implemented | §55, P3-04, P3-05 |
+| [DS-22](#ds-22-smtp-pipelining--chunking) | SMTP pipelining & chunking | Implemented | §20, P3-15 |
 | [DS-23](#ds-23-production-hardening-ha-dr-scaling--observability) | Production hardening: HA, DR, scaling & observability | Accepted | §37–§46, Phase 4 |
+| [DS-24](#ds-24-email-template-tags) | Email template tags (#USERID#, #INVOICE#, …) | Implemented | §51, user request |
 
 ---
 
@@ -778,6 +779,46 @@ and TLS guidance is in DEPLOYMENT.md. A real environment is still an operator ta
 
 ---
 
+## DS-24 Email template tags
+
+**Status:** Implemented (2026-09-29): user request (tag reference table screenshot).
+
+Tags work in the **subject, HTML and plain-text bodies** next to `{{csv_column}}` merge variables.
+
+| Tag | Value | Example |
+|---|---|---|
+| `#USERID#` | local part of the recipient address | `mahdi@gmail.com` → `mahdi` |
+| `#EMAIL#` | full recipient address | `mahdi@gmail.com` |
+| `#RANDOM#` | 7-digit number (from a UUID) | `5832147` |
+| `#SUBSID#` | 10-char uppercase ID (from a UUID) | `A7F23B91C2` |
+| `#INVOICE#` | 7-char uppercase ID (from a UUID) | `9F3A72B` |
+| `#REF#` | 8-char uppercase ID (from a UUID) | `A82C91F4` |
+| `#HASH#` | 32-byte hex (64 chars) | `a4f82c9e…` |
+| `#DATE#` / `#TIME#` | send time, `YYYY-MM-DD` / `HH:MM:SS`, setting `template_timezone` (default UTC) | `2026-09-23` / `16:59:42` |
+| `#OTP#` | 6 digits | `583921` |
+| `#$$#` | 10–99 | `47` |
+| `#MASSAGE#` (alias `#MESSAGE#`) | one entry of the campaign's `message_list` (≤ 100 × 500 chars) | `Welcome` |
+
+- **Where:** rendered by the worker per recipient (`worker/app/sender/tags.py`), in both the compiled fast
+  path and the EmailMessage path.
+- **Deterministic per message, unpredictable across recipients:** each value comes from
+  `HMAC-SHA256(tag_seed, "<recipient id>:<tag>")` (UUID-shaped values take 16 bytes of the digest).
+  `tag_seed` is 32 random bytes generated per campaign (migration 0008 backfills existing ones). It is sent
+  only to workers in the claim payload and never returned by the API. Consequences:
+  - a tag has the same value in the subject and all body parts of one message;
+  - a retried send renders the same values;
+  - a recipient cannot derive anyone else's values.
+- **Secure substitution:** the template is scanned once for `{{vars}}` and `#TAGS#` together, so inserted
+  values (recipient data, messages) are never re-scanned. Values are HTML-escaped in HTML and stripped of
+  CR/LF in headers. Unknown `#WORDS#` are left as written.
+- **UI:** a shared `TemplateTagsTable` (Tag · What it does · Example input · Example output) with
+  per-tag copy, "copy all" and, in the content editor, insert-at-cursor. It sits beside the subject (details
+  step, compact) and with the HTML editor/preview (content step). The preview renders sample values.
+  The admin campaign dialog has the same table and the `#MASSAGE#` list.
+- **Not an authentication OTP:** `#OTP#` is a per-message code for display; it is not stored or verified.
+
+---
+
 ## Architecture Decision Records (ADRs)
 
 Format: **Context → Decision → Consequences**. Status: Proposed / Accepted / Superseded.
@@ -1023,6 +1064,8 @@ retention (P3-11/12), and Phase 4 hardening.
 ## Design changelog
 
 Newest first.
+
+- **2026-09-29 · v0.6.0**: DS-18…DS-22 implemented; added DS-24 (email template tags).
 
 - **2026-09-29 · v0.5.0**: Phase 3/4 designs: DS-18 (partitioning & retention), DS-19 (scheduler/processor processes, event inbox), DS-20 (SSE), DS-21 (object storage & import worker), DS-22 (SMTP pipelining/chunking), DS-23 (HA, DR, autoscaling, observability, Redis ACL, deployment); ADR-013…ADR-016.
 

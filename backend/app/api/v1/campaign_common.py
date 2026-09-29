@@ -32,7 +32,7 @@ from app.services import campaigns as svc
 from app.services import jobs as job_service
 from app.services.audit import RequestContext
 
-_EDIT_FIELDS = ("name", "subject", "from_name", "from_email", "reply_to", "html_body", "text_body",
+_EDIT_FIELDS = ("name", "subject", "from_name", "from_email", "reply_to", "html_body", "text_body", "message_list",
                 "batch_size", "scheduled_at", "provider_id")
 
 
@@ -61,7 +61,8 @@ async def apply_update(db: AsyncSession, campaign: Campaign, body: CampaignUpdat
     data = body.model_dump(exclude_unset=True)
     if "provider_id" in data and data["provider_id"] is not None:
         await svc.validate_provider_choice(db, campaign.user_id, data["provider_id"])
-    before = {k: getattr(campaign, k) for k in _EDIT_FIELDS if k in data and k not in ("html_body", "text_body")}
+    content = {"html_body", "text_body", "message_list"}
+    before = {k: getattr(campaign, k) for k in _EDIT_FIELDS if k in data and k not in content}
     for key, value in data.items():
         if key not in _EDIT_FIELDS or (key in ("name", "subject") and value is None):
             continue
@@ -69,9 +70,9 @@ async def apply_update(db: AsyncSession, campaign: Campaign, body: CampaignUpdat
     svc.refresh_readiness(campaign)
     after = {k: getattr(campaign, k) for k in before}
     old, new = audit.diff(before, after)
-    if old or new or "html_body" in data or "text_body" in data:
+    if old or new or content & data.keys():
         audit.record(db, ctx, "CAMPAIGN_UPDATED", "campaign", campaign.id, old=old,
-                     new={**new, **({"content": "changed"} if {"html_body", "text_body"} & data.keys() else {})})
+                     new={**new, **({"content": "changed"} if content & data.keys() else {})})
     await db.commit()
     await db.refresh(campaign)
     return campaign

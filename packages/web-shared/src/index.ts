@@ -18,3 +18,5 @@ export * from "./lib/useAction";
 export * from "./ui/apiKeys";
 export * from "./lib/useLiveQuery";
 export * from "./lib/storageUpload";
+export * from "./lib/templateTags";
+export * from "./ui/templateTags";

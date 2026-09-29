@@ -107,6 +107,7 @@ export interface Campaign {
   missing: string[] | null;
   html_body?: string | null;
   text_body?: string | null;
+  message_list?: string[] | null;
 }
 
 export interface CampaignStats {

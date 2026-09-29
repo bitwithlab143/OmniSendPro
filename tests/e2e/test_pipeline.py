@@ -15,6 +15,7 @@ import asyncio
 import hashlib
 import hmac
 import os
+import re
 import signal
 import socket
 import subprocess
@@ -159,8 +160,9 @@ async def test_full_pipeline(backend: str, smtp_sink) -> None:  # noqa: ANN001
         r = await c.post("/api/v1/auth/login", json={"login": "sender", "password": USER_PASSWORD, "app": "user"})
         user = {"Authorization": f"Bearer {r.json()['access_token']}"}
         r = await c.post("/api/v1/user/campaigns", headers=user, json={
-            "name": "E2E launch", "subject": "Hello {{first_name}}", "from_email": "news@brand.example",
-            "from_name": "Brand", "html_body": "<h1>Hi {{first_name}}</h1><p>Welcome aboard.</p>",
+            "name": "E2E launch", "subject": "Hello {{first_name}} #USERID#", "from_email": "news@brand.example",
+            "from_name": "Brand", "html_body": "<h1>Hi {{first_name}}</h1><p>Welcome aboard. Invoice #INVOICE#, "
+            "ref #REF#, #MASSAGE#</p>", "message_list": ["Enjoy!"],
             "provider_id": provider_id, "batch_size": 500})
         cid = r.json()["id"]
         emails = [f"person{i}@example.org" for i in range(120)] + [REJECTED, "suppressed@example.org"]
@@ -205,7 +207,13 @@ async def test_full_pipeline(backend: str, smtp_sink) -> None:  # noqa: ANN001
         assert len({rcpt for rcpt, _ in sink.messages}) == 120, "no duplicates"
         rcpt, raw = next(m for m in sink.messages if m[0] == "person7@example.org")
         msg = message_from_bytes(raw, policy=policy.default)
-        assert msg["Subject"] == "Hello Name7"
+        assert msg["Subject"] == "Hello Name7 person7", "template tags rendered per recipient"
+        body7 = msg.get_body(("html",)).get_content()
+        invoice7 = re.search(r"Invoice ([0-9A-F]{7}), ref ([0-9A-F]{8}), Enjoy!", body7)
+        assert invoice7, body7
+        _, raw8 = next(m for m in sink.messages if m[0] == "person8@example.org")
+        body8 = message_from_bytes(raw8, policy=policy.default).get_body(("html",)).get_content()
+        assert invoice7.group(1) not in body8, "each recipient gets their own values"
         assert msg["List-Unsubscribe-Post"] == "List-Unsubscribe=One-Click"
         unsub = str(msg["List-Unsubscribe"]).strip("<>")
         assert unsub.startswith(backend)

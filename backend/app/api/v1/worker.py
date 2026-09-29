@@ -22,6 +22,7 @@ from app.schemas.domain import (
     WorkerTokenRequest,
 )
 from app.services import jobs as job_service
+from app.services import settings as settings_service
 from app.services import workers as worker_service
 
 router = APIRouter(prefix="/worker", tags=["worker"])
@@ -53,7 +54,7 @@ async def claim(db: DB, worker: CurrentWorker) -> Response | dict[str, Any]:
     claimed = await job_service.claim(db, worker)
     if claimed is None:
         return Response(status_code=204)
-    return job_service.claim_payload(claimed)
+    return job_service.claim_payload(claimed, str(await settings_service.get(db, "template_timezone")))
 
 
 @router.post("/jobs/{job_id}/lease")

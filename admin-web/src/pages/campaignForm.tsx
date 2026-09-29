@@ -1,4 +1,4 @@
-import { Field, Input, Select, Textarea, type Page } from "@omnisend/web-shared";
+import { Field, Input, Select, TemplateTagsTable, Textarea, type Page } from "@omnisend/web-shared";
 import { useQuery } from "@tanstack/react-query";
 
 import { api } from "../api";
@@ -20,6 +20,10 @@ export function campaignBody(f: FormData): Record<string, unknown> {
     text_body: v("text_body"),
     provider_id: v("provider_id"),
     batch_size: f.get("batch_size") ? Number(f.get("batch_size")) : null,
+    message_list: String(f.get("message_list") ?? "")
+      .split("\n")
+      .map((m) => m.trim())
+      .filter(Boolean),
   };
 }
 
@@ -32,7 +36,7 @@ export function CampaignFields({ userId, campaign }: { userId: string | null; ca
   return (
     <div className="grid gap-4 sm:grid-cols-2">
       <Field label="Campaign name" className="sm:col-span-2">{(id) => <Input id={id} name="name" defaultValue={campaign?.name} required maxLength={200} />}</Field>
-      <Field label="Subject" hint="Use {{first_name}} or any CSV column for personalisation." className="sm:col-span-2">
+      <Field label="Subject" hint="Use {{first_name}} (any CSV column) or tags such as #INVOICE#." className="sm:col-span-2">
         {(id, d) => <Input id={id} name="subject" defaultValue={campaign?.subject} aria-describedby={d} maxLength={998} />}
       </Field>
       <Field label="From name" optional>{(id) => <Input id={id} name="from_name" defaultValue={campaign?.from_name ?? ""} />}</Field>
@@ -67,6 +71,13 @@ export function CampaignFields({ userId, campaign }: { userId: string | null; ca
       <Field label="Plain-text body" optional className="sm:col-span-2" hint="Generated from the HTML when empty.">
         {(id, d) => <Textarea id={id} name="text_body" defaultValue={campaign?.text_body ?? ""} rows={4} className="font-mono text-xs" aria-describedby={d} />}
       </Field>
+      <Field label="Messages for #MASSAGE#" optional className="sm:col-span-2" hint="One per line; each email gets one at random.">
+        {(id, d) => <Textarea id={id} name="message_list" defaultValue={(campaign?.message_list ?? []).join("\n")} rows={3} aria-describedby={d} />}
+      </Field>
+      <details className="group sm:col-span-2" open>
+        <summary className="cursor-pointer text-sm font-medium text-fg-secondary">Available tags</summary>
+        <TemplateTagsTable className="mt-2" />
+      </details>
     </div>
   );
 }

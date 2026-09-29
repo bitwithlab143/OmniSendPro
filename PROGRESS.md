@@ -46,7 +46,7 @@ Phases follow `ARCHITECTURE.md §62 Development Phases`, plus a Phase 0 for setu
 | **Phase 0**: Foundation & Planning | Understand architecture, resolve gaps, scaffold monorepo, dev environment | ✅ | 12 / 12 |
 | **Phase 1**: MVP | Admin/User login, campaigns, provider management, basic queue, single worker, basic sending & reports | ✅ | 22 / 22 |
 | **Phase 2**: Reliability & Compliance | Batch processing, retries, worker monitoring, provider health, suppression, audit logs | ✅ | 15 / 15 |
-| **Phase 3**: Scale & Real-time | Multiple workers, horizontal scaling, real-time dashboard, advanced reports, object storage, event processing | 🔄 | 6 / 15 |
+| **Phase 3**: Scale & Real-time | Multiple workers, horizontal scaling, real-time dashboard, advanced reports, object storage, event processing | 🔄 | 15 / 16 (P3-10 large multi-machine run left) |
 | **Phase 4**: Production Hardening | HA, DB replication, queue HA, autoscaling, observability, disaster recovery | 🔄 | 0 / 10 (4 partial) |
 
 ---
@@ -134,6 +134,7 @@ Phases follow `ARCHITECTURE.md §62 Development Phases`, plus a Phase 0 for setu
 | P3-13 | Worker throughput: compiled messages, SMTP connection reuse across jobs, uvloop | DS-08 | ✅ | 2026-09-29 | 396 → 2,307 msgs/s per worker (docs/PERFORMANCE.md) |
 | P3-14 | Provider `max_connections` + immediate scheduler wake-up on start/resume | DS-06, DS-05 | ✅ | 2026-09-29 | Migration 0002; start latency ≈1 s |
 | P3-15 | SMTP PIPELINING (RFC 2920) client | DS-08, DS-22, ADR-016 | ✅ | 2026-09-29 | Own asyncio SMTP client: PIPELINING+CHUNKING = 1 round trip/message, PIPELINING = 2, else lock-step; `WORKER_SMTP_PIPELINING`. 25 ms RTT, 1 worker × 16 connections: 153 → 590 msgs/s |
+| P3-16 | Email template tags (#USERID#, #RANDOM#, #EMAIL#, #SUBSID#, #INVOICE#, #REF#, #HASH#, #DATE#, #TIME#, #OTP#, #$$#, #MASSAGE#) | DS-24 | ✅ | 2026-09-29 | User request. Worker renders per recipient (HMAC of a secret per-campaign seed: stable per message, unpredictable across recipients; HTML/header-safe); `message_list` + `template_timezone`; "Available tags" table with copy/insert beside subject and HTML editors |
 
 ## Phase 4: Production Hardening
 
@@ -226,6 +227,7 @@ Short record of decisions that changed scope or design. Full rationale lives in 
 
 Newest first. One line per completed task or significant change.
 
+- **2026-09-29**: Email template tags (DS-24, user request) and the "Available tags" reference table with copy-to-clipboard; SMTP pipelining/chunking (P3-15: 153 → 590 msgs/s at 25 ms RTT); large uploads via object storage + import worker (P3-04/05); SSE live dashboards (P3-03); runner process + event inbox (P3-02/06); partitioning + retention (P3-11/12).
 - **2026-09-29**: API keys (DS-17): `api_keys` table (migration 0004), `osk_` bearer auth on the User API with scopes ∩ role, per-key rate limit, session-only account endpoints, admin *API keys* page and user *Profile → API keys*; shared key table/dialogs in `web-shared`. Failed connection tests / polls now show error toasts. `npm test` no longer fails on the apps without test files. Phase 2 complete. (P2-15)
 
 - **2026-09-29**: Asynchronous bounces and complaints (DS-16): DSN/ARF parser, IMAP bounce mailbox per provider (scheduler-polled, test/poll/remove in the admin UI), signed raw-message endpoint and `forward-bounce.sh`, correlation by Message-ID or campaign + address restricted to the sending provider, SSRF guard and mandatory TLS for IMAP. 17 new tests. Resolves R-07. (P2-10)

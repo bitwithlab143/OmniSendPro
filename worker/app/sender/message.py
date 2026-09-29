@@ -1,7 +1,8 @@
-"""Message rendering: merge variables, unsubscribe headers/footer, MIME assembly.
+"""Message rendering: merge variables, template tags, unsubscribe headers/footer, MIME assembly.
 
-Security: variable values are HTML-escaped in the HTML part and stripped of CR/LF in headers, so
-recipient data can never inject markup or extra headers.
+Security: variable and tag values are HTML-escaped in the HTML part and stripped of CR/LF in headers, so
+recipient data can never inject markup or extra headers. Templates are scanned once: values inserted into
+a template are never scanned again, so recipient data cannot smuggle in {{variables}} or #TAGS#.
 """
 
 from __future__ import annotations
@@ -19,7 +20,10 @@ from email.message import EmailMessage
 from email.utils import formataddr, formatdate
 from typing import Any
 
+from app.sender import tags as _tags
+
 _VAR = re.compile(r"\{\{\s*([a-zA-Z0-9_]+)\s*\}\}")
+_TOKEN = re.compile(_VAR.pattern + "|" + _tags.TAG_RE.pattern)
 _TAG = re.compile(r"<[^>]+>")
 _BLOCK = re.compile(r"</(p|div|h[1-6]|li|tr)>|<br\s*/?>", re.I)
 _WS = re.compile(r"[ \t]+")
@@ -29,19 +33,33 @@ def _clean_header(value: str) -> str:
     return value.replace("\r", " ").replace("\n", " ").strip()
 
 
-def render(template: str | None, variables: dict[str, Any], mode: str) -> str:
+def _escape(value: str, mode: str) -> str:
+    if mode == "html":
+        return html.escape(value, quote=True)
+    if mode == "header":
+        return _clean_header(value)
+    return value
+
+
+def render(template: str | None, variables: dict[str, Any], mode: str,
+           tag_values: _tags.TagValues | None = None) -> str:
     if not template:
         return ""
 
     def sub(match: re.Match[str]) -> str:
-        value = str(variables.get(match.group(1).lower(), variables.get(match.group(1), "")))
-        if mode == "html":
-            return html.escape(value, quote=True)
-        if mode == "header":
-            return _clean_header(value)
-        return value
+        name = match.group(1)
+        if name is None:  # a #TAG#
+            return _escape(tag_values.get(match.group(2)), mode) if tag_values else match.group(0)
+        return _escape(str(variables.get(name.lower(), variables.get(name, ""))), mode)
 
-    return _VAR.sub(sub, template)
+    return _TOKEN.sub(sub, template)
+
+
+def tag_values_for(campaign: dict[str, Any], recipient: dict[str, Any]) -> _tags.TagValues:
+    # Older control planes do not send a seed: fall back to the campaign id (still per-message stable).
+    seed = campaign.get("tag_seed") or f"campaign:{campaign.get('id')}"
+    return _tags.TagValues(seed, recipient.get("id", recipient.get("email")), recipient["email"],
+                           campaign.get("message_list"), campaign.get("tag_timezone") or "UTC")
 
 
 def html_to_text(markup: str) -> str:
@@ -60,8 +78,9 @@ def build(campaign: dict[str, Any], recipient: dict[str, Any]) -> tuple[EmailMes
     message_id = f"<{uuid.uuid4().hex}@{domain}>"
     unsub = recipient["unsubscribe_url"]
 
+    tv = tag_values_for(campaign, recipient)
     msg = EmailMessage()
-    msg["Subject"] = render(campaign.get("subject") or "", variables, "header")
+    msg["Subject"] = render(campaign.get("subject") or "", variables, "header", tv)
     local, _, dom = from_email.partition("@")
     msg["From"] = Address(display_name=_clean_header(campaign.get("from_name") or ""), username=local, domain=dom)
     msg["To"] = recipient["email"]
@@ -78,12 +97,13 @@ def build(campaign: dict[str, Any], recipient: dict[str, Any]) -> tuple[EmailMes
     text_tpl = campaign.get("text_body")
     has_unsub_link = any("unsubscribe_url" in (t or "") for t in (html_tpl, text_tpl))
 
-    text_part = render(text_tpl, variables, "text") if text_tpl else html_to_text(render(html_tpl, variables, "html"))
+    text_part = (render(text_tpl, variables, "text", tv) if text_tpl
+                 else html_to_text(render(html_tpl, variables, "html", tv)))
     if not has_unsub_link:
         text_part += f"\n\n--\nUnsubscribe: {unsub}"
     msg.set_content(text_part)
     if html_tpl:
-        html_part = render(html_tpl, variables, "html")
+        html_part = render(html_tpl, variables, "html", tv)
         if not has_unsub_link:
             footer = (f'<p style="font-size:12px;color:#6b7280;margin-top:24px">'
                       f'<a href="{html.escape(unsub, quote=True)}">Unsubscribe</a></p>')
@@ -155,7 +175,7 @@ class CompiledCampaign:
         ]
         self._static = "\r\n".join(static)
         # Subject / bodies without merge variables are rendered once for the whole job.
-        self._static_subject = (None if _VAR.search(self.subject_tpl)
+        self._static_subject = (None if _TOKEN.search(self.subject_tpl)
                                 else _encode_header(render(self.subject_tpl, {}, "header")))
 
     def render(self, recipient: dict[str, Any]) -> tuple[bytes, str]:
@@ -168,12 +188,13 @@ class CompiledCampaign:
                      "email": email, "unsubscribe_url": recipient["unsubscribe_url"]}
         unsub = recipient["unsubscribe_url"]
         message_id = f"<{uuid.uuid4().hex}@{self.domain}>"
+        tv = tag_values_for(self.campaign, recipient)
         subject = self._static_subject
         if subject is None:
-            subject = _encode_header(render(self.subject_tpl, variables, "header"))
+            subject = _encode_header(render(self.subject_tpl, variables, "header", tv))
 
-        text_part = (render(self.text_tpl, variables, "text") if self.text_tpl
-                     else html_to_text(render(self.html_tpl, variables, "html")))
+        text_part = (render(self.text_tpl, variables, "text", tv) if self.text_tpl
+                     else html_to_text(render(self.html_tpl, variables, "html", tv)))
         if not self.has_unsub_link:
             text_part += f"\n\n--\nUnsubscribe: {unsub}"
         text_part = text_part.replace("\r\n", "\n").replace("\n", "\r\n")
@@ -193,7 +214,7 @@ class CompiledCampaign:
             ) + _b64_lines(text_part)
             return headers.encode() + body, message_id
 
-        html_part = render(self.html_tpl, variables, "html")
+        html_part = render(self.html_tpl, variables, "html", tv)
         if not self.has_unsub_link:
             footer = (f'<p style="font-size:12px;color:#6b7280;margin-top:24px">'
                       f'<a href="{html.escape(unsub, quote=True)}">Unsubscribe</a></p>')

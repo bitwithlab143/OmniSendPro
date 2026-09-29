@@ -184,6 +184,17 @@ class CampaignBase(BaseModel):
     provider_id: uuid.UUID | None = None
     batch_size: int | None = Field(default=None, ge=1, le=100_000)
     scheduled_at: datetime | None = None
+    message_list: list[str] | None = Field(default=None, max_length=100, description="Texts for #MASSAGE#")
+
+    @field_validator("message_list")
+    @classmethod
+    def _messages(cls, v: list[str] | None) -> list[str] | None:
+        if v is None:
+            return None
+        cleaned = [m.strip() for m in v if m and m.strip()]
+        if any(len(m) > 500 for m in cleaned):
+            raise ValueError("Each message can be at most 500 characters")
+        return cleaned or None
 
     @field_validator("subject", "from_name")
     @classmethod
@@ -251,6 +262,7 @@ class CampaignOut(ORM):
 class CampaignDetail(CampaignOut):
     html_body: str | None
     text_body: str | None
+    message_list: list[str] | None = None
 
 
 class CampaignStats(BaseModel):

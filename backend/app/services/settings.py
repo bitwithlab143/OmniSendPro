@@ -41,6 +41,7 @@ DEFAULTS: dict[str, Any] = {
     "bounce_poll_interval_seconds": 60,
     # API keys (DS-17)
     "api_key_requests_per_minute": 600,
+    "template_timezone": "UTC",
     "retention_events_days": 400,
     "retention_audit_days": 400,
     "retention_health_days": 90,
@@ -68,6 +69,7 @@ SETTING_DESCRIPTIONS: dict[str, str] = {
     "require_from_domain_match": "Campaign From domain must match the provider's From domain",
     "bounce_poll_interval_seconds": "How often bounce/complaint mailboxes are read",
     "api_key_requests_per_minute": "Request limit per API key",
+    "template_timezone": "Timezone for the #DATE# / #TIME# template tags (IANA name, e.g. Asia/Dhaka)",
     "retention_events_days": "Keep delivery events for this many days",
     "retention_audit_days": "Keep audit logs for this many days (minimum 90)",
     "retention_health_days": "Keep provider health history for this many days",
@@ -118,6 +120,14 @@ MINIMUMS: dict[str, int] = {
 def validate_setting(key: str, value: Any) -> str | None:
     if key not in DEFAULTS:
         return f"Unknown setting {key!r}"
+    if key == "template_timezone":
+        from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
+
+        try:
+            ZoneInfo(str(value))
+        except (ZoneInfoNotFoundError, ValueError):
+            return "Unknown timezone (use an IANA name such as UTC or Asia/Dhaka)"
+        return None
     default = DEFAULTS[key]
     if isinstance(default, bool):
         return None if isinstance(value, bool) else "Expected a boolean"

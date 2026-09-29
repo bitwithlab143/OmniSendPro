@@ -10,6 +10,7 @@ export interface Campaign {
   reply_to: string | null;
   html_body?: string | null;
   text_body?: string | null;
+  message_list?: string[] | null;
   status: string;
   batch_size: number;
   total_recipients: number;

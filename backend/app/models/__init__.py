@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import secrets
 import uuid
 from datetime import datetime
 from enum import StrEnum
@@ -289,6 +290,10 @@ class Campaign(TimestampMixin, Base):
     reply_to: Mapped[str | None] = mapped_column(String(320))
     html_body: Mapped[str | None] = mapped_column(Text)
     text_body: Mapped[str | None] = mapped_column(Text)
+    # Template tags (design DS-24): candidate texts for #MASSAGE#, and the per-campaign secret that makes
+    # tag values unpredictable yet stable per message. The seed is only ever sent to workers.
+    message_list: Mapped[list[str] | None] = mapped_column(JSONB)
+    tag_seed: Mapped[str] = mapped_column(String(64), default=lambda: secrets.token_hex(32))
     status: Mapped[CampaignStatus] = mapped_column(
         enum_col(CampaignStatus, "campaign_status"), default=CampaignStatus.DRAFT
     )

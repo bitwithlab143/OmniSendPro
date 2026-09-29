@@ -49,6 +49,11 @@ and Swagger UI at `/api/docs` in non-production environments; it is the canonica
 curl -H "Authorization: Bearer $OMNISEND_API_KEY" https://panel.example.com/api/v1/user/campaigns
 ```
 
+Campaign content accepts `{{csv_column}}` merge variables and template tags (`#USERID#`, `#EMAIL#`,
+`#RANDOM#`, `#SUBSID#`, `#INVOICE#`, `#REF#`, `#HASH#`, `#DATE#`, `#TIME#`, `#OTP#`, `#$$#`, `#MASSAGE#`) in
+the subject and bodies. `message_list` (≤ 100 strings) supplies `#MASSAGE#`; the timezone for `#DATE#`/`#TIME#`
+is the `template_timezone` setting. See design DS-24.
+
 Starting a campaign requires `{"consent_confirmed": true}` and passes the DS-04 guards (ready,
 provider assigned & healthy, From domain matches the provider, per-campaign recipient limit).
 

@@ -211,7 +211,7 @@ async def _mark_suppressed(db: AsyncSession, job: Job, recipient_ids: list[int])
         )
 
 
-def claim_payload(claimed: ClaimedJob) -> dict[str, Any]:
+def claim_payload(claimed: ClaimedJob, tag_timezone: str = "UTC") -> dict[str, Any]:
     c, p, j = claimed.campaign, claimed.provider, claimed.job
     secret = decrypt_secret(p.credential.encrypted_secret) if p.credential else None
     return {
@@ -227,6 +227,10 @@ def claim_payload(claimed: ClaimedJob) -> dict[str, Any]:
             "reply_to": c.reply_to,
             "html_body": c.html_body,
             "text_body": c.text_body,
+            # Template tags (design DS-24): the seed never leaves the control plane except to workers.
+            "message_list": c.message_list or [],
+            "tag_seed": c.tag_seed,
+            "tag_timezone": tag_timezone,
         },
         "provider": {
             "id": str(p.id),
