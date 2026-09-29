@@ -19,6 +19,7 @@ export function providerBody(f: FormData, includePassword: boolean): Record<stri
     hourly_limit: numOrNull(f.get("hourly_limit")),
     daily_limit: numOrNull(f.get("daily_limit")),
     per_second_limit: numOrNull(f.get("per_second_limit")),
+    max_connections: numOrNull(f.get("max_connections")),
   };
   if (includePassword && f.get("password")) body.password = f.get("password");
   return body;
@@ -52,6 +53,9 @@ export function ProviderFields({ provider, withPassword }: { provider?: Provider
       <Field label="Per-second limit" optional>{(id) => <Input id={id} name="per_second_limit" type="number" min={1} defaultValue={provider?.per_second_limit ?? ""} />}</Field>
       <Field label="Hourly limit" optional>{(id) => <Input id={id} name="hourly_limit" type="number" min={1} defaultValue={provider?.hourly_limit ?? ""} />}</Field>
       <Field label="Daily limit" optional>{(id) => <Input id={id} name="daily_limit" type="number" min={1} defaultValue={provider?.daily_limit ?? ""} />}</Field>
+      <Field label="Max connections" optional hint="Simultaneous SMTP sessions per worker allowed by the provider. Higher = faster over real networks.">
+        {(id, d) => <Input id={id} name="max_connections" type="number" min={1} max={500} defaultValue={provider?.max_connections ?? ""} aria-describedby={d} />}
+      </Field>
     </div>
   );
 }

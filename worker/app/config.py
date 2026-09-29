@@ -39,7 +39,7 @@ class WorkerConfig:
     hostname: str = field(default_factory=socket.gethostname)
     result_flush_interval: float = 1.0
     result_flush_size: int = 200
-    idle_poll_max: float = 5.0
+    idle_poll_max: float = 2.0
     send_timeout: float = 30.0
     verify_tls: bool = True
 

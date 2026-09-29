@@ -152,6 +152,7 @@ export function ProviderDetailPage() {
                 ["From", `${p.from_name ? `${p.from_name} ` : ""}<${p.from_email}>`],
                 ["Credential", p.has_secret ? <Badge tone="success" icon={<CheckCircle2 />}>Stored encrypted</Badge> : <Badge>None</Badge>],
                 ["Limits", [p.per_second_limit && `${p.per_second_limit}/s`, p.hourly_limit && `${fmt(p.hourly_limit)}/hour`, p.daily_limit && `${fmt(p.daily_limit)}/day`].filter(Boolean).join(" · ") || "No limits"],
+                ["Connections per worker", p.max_connections ? fmt(p.max_connections) : "Worker default"],
                 ["Usage", p.usage ? `${fmt(p.usage.hour)} this hour · ${fmt(p.usage.day)} today` : "—"],
                 ["Last test", p.last_tested_at ? `${p.last_test_ok ? "Passed" : "Failed"} ${fmtRelative(p.last_tested_at)} — ${p.last_test_message ?? ""}` : "Never"],
                 ["Delivery webhook", p.webhook_enabled ? <Badge tone="success" icon={<Webhook />}>Enabled</Badge> : <Badge>Not configured</Badge>],

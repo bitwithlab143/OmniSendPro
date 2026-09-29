@@ -35,6 +35,7 @@ class ProviderBase(BaseModel):
     hourly_limit: int | None = Field(default=None, ge=1)
     daily_limit: int | None = Field(default=None, ge=1)
     per_second_limit: int | None = Field(default=None, ge=1, le=100_000)
+    max_connections: int | None = Field(default=None, ge=1, le=500)
 
 
 class ProviderCreate(ProviderBase):
@@ -53,6 +54,7 @@ class ProviderUpdate(BaseModel):
     hourly_limit: int | None = Field(default=None, ge=1)
     daily_limit: int | None = Field(default=None, ge=1)
     per_second_limit: int | None = Field(default=None, ge=1, le=100_000)
+    max_connections: int | None = Field(default=None, ge=1, le=500)
 
 
 class ProviderSecretIn(BaseModel):
@@ -72,6 +74,7 @@ class ProviderOut(ORM):
     hourly_limit: int | None
     daily_limit: int | None
     per_second_limit: int | None
+    max_connections: int | None = None
     status: ProviderStatus
     status_reason: str | None
     health_score: float

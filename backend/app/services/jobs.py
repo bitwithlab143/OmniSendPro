@@ -236,6 +236,7 @@ def claim_payload(claimed: ClaimedJob) -> dict[str, Any]:
             "username": p.username,
             "password": secret,
             "tls_mode": p.tls_mode.value,
+            "max_connections": p.max_connections,
         },
         "rate_limit_per_second": claimed.per_second,
         "recipients": claimed.recipients,

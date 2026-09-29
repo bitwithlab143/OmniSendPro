@@ -13,6 +13,7 @@ from redis.asyncio import Redis
 
 from app.config import WorkerConfig
 from app.health.metrics import RateMeter, system_usage
+from app.providers.smtp import SmtpPoolRegistry
 from app.queue.client import ApiClient, WorkerDisabledError
 from app.rate_limit.bucket import LocalBucket, Unlimited
 from app.sender.runner import JobRunner
@@ -34,6 +35,7 @@ class Worker:
         self.redis: Redis | None = Redis.from_url(config.redis_url) if config.redis_url else None
         self.worker_bucket: LocalBucket | Unlimited = Unlimited()
         self.provider_factory = provider_factory
+        self.pools: SmtpPoolRegistry | None = None
         self.jobs_completed = 0
 
     async def _heartbeat(self, status: str = "online") -> None:
@@ -63,6 +65,10 @@ class Worker:
         capacity = self.config.capacity or info.get("capacity")
         if capacity:
             self.worker_bucket = LocalBucket(float(capacity))
+        if self.provider_factory is None:
+            # Shared per-provider SMTP pools: enough connections for every concurrent job.
+            self.pools = SmtpPoolRegistry(self.config.smtp_connections_per_job * self.max_jobs,
+                                          self.config.send_timeout)
         log.info("worker_registered", extra={"max_jobs": self.max_jobs, "capacity": capacity})
         hb = asyncio.create_task(self._heartbeat_loop())
         idle_delay = 0.5
@@ -80,6 +86,8 @@ class Worker:
                 except Exception as exc:  # noqa: BLE001
                     log.warning("claim_failed", extra={"error": str(exc)})
                     job = None
+                if self.pools is not None:
+                    await self.pools.sweep()
                 if job is None:
                     idle_polls += 1
                     if max_idle_polls is not None and idle_polls >= max_idle_polls and not self.running:
@@ -91,7 +99,7 @@ class Worker:
                 idle_polls = 0
                 idle_delay = 0.5
                 runner = JobRunner(self.api, self.config, job, self.meter, self.worker_bucket, self.redis,
-                                   self.provider_factory)
+                                   self.provider_factory, self.pools)
                 runner.lease_seconds = self.lease_seconds
                 task = asyncio.create_task(self._run_job(runner))
                 self.running[runner.job_id] = (task, runner)
@@ -116,6 +124,8 @@ class Worker:
         if tasks:
             await asyncio.wait(tasks, timeout=60)
         await self._heartbeat("offline")
+        if self.pools is not None:
+            await self.pools.close()
         await self.api.close()
         if self.redis is not None:
             await self.redis.aclose()

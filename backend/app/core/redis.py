@@ -55,4 +55,5 @@ class Keys:
         return f"ratelimit:login:{ip}"
 
     SCHEDULER_LOCK = "lock:scheduler"
+    SCHEDULER_WAKE = "wake:scheduler"
     HEALTH_LOCK = "lock:provider-health"

@@ -7,7 +7,7 @@
 
 **Last updated:** 2026-09-29
 **Current phase:** Phase 2 (Reliability & Compliance) is nearly complete; Phase 3 (Scale & Real-time) has started
-**Overall status:** 🟢 MVP implemented and tested end to end (backend, worker, both web apps, Docker/CI)
+**Overall status:** 🟢 MVP implemented and tested end to end; performance pass done (≈5× per worker, 17M/hour measured)
 
 ---
 
@@ -46,7 +46,7 @@ Phases follow `ARCHITECTURE.md §62 Development Phases`, plus a Phase 0 for setu
 | **Phase 0**: Foundation & Planning | Understand architecture, resolve gaps, scaffold monorepo, dev environment | ✅ | 12 / 12 |
 | **Phase 1**: MVP | Admin/User login, campaigns, provider management, basic queue, single worker, basic sending & reports | ✅ | 22 / 22 |
 | **Phase 2**: Reliability & Compliance | Batch processing, retries, worker monitoring, provider health, suppression, audit logs | 🔄 | 14 / 15 |
-| **Phase 3**: Scale & Real-time | Multiple workers, horizontal scaling, real-time dashboard, advanced reports, object storage, event processing | 🔄 | 4 / 12 |
+| **Phase 3**: Scale & Real-time | Multiple workers, horizontal scaling, real-time dashboard, advanced reports, object storage, event processing | 🔄 | 6 / 15 |
 | **Phase 4**: Production Hardening | HA, DB replication, queue HA, autoscaling, observability, disaster recovery | 🔄 | 0 / 10 (4 partial) |
 
 ---
@@ -128,9 +128,12 @@ Phases follow `ARCHITECTURE.md §62 Development Phases`, plus a Phase 0 for setu
 | P3-07 | Advanced reports: bounce, complaint, per-user, per-provider | DS-09 | ✅ | 2026-09-29 | Rates plus per-user and per-provider breakdowns |
 | P3-08 | Cursor-based pagination across all list endpoints | DS-09 | ✅ | 2026-09-29 | |
 | P3-09 | Metrics endpoint (Prometheus) for backend & workers | DS-15 | ✅ | 2026-09-29 | Backend `/metrics`; worker metrics arrive through heartbeats |
-| P3-10 | Load test: 10k jobs, 100k / 500k / 1M recipients | DS-15 | ⬜ | | |
+| P3-10 | Load test: 10k jobs, 100k / 500k / 1M recipients | DS-15 | 🔄 | 2026-09-29 | `tests/load/run_load.py` + results in `docs/PERFORMANCE.md` (up to 60k recipients, 1–3 workers, simulated latency). **Remaining:** 500k–1M run on separate machines |
 | P3-11 | Table partitioning for email_events / heartbeats / health logs / audit logs | DS-03 | ⬜ | | |
 | P3-12 | Retention/cleanup jobs for heartbeats, health logs, expired refresh tokens | DS-03 | ⬜ | | Found during implementation; these tables grow without limit today |
+| P3-13 | Worker throughput: compiled messages, SMTP connection reuse across jobs, uvloop | DS-08 | ✅ | 2026-09-29 | 396 → 2,307 msgs/s per worker (docs/PERFORMANCE.md) |
+| P3-14 | Provider `max_connections` + immediate scheduler wake-up on start/resume | DS-06, DS-05 | ✅ | 2026-09-29 | Migration 0002; start latency ≈1 s |
+| P3-15 | SMTP PIPELINING (RFC 2920) client | DS-08 | ⬜ | | Next speed step for real (high-latency) providers |
 
 ## Phase 4: Production Hardening
 
@@ -144,7 +147,7 @@ Phases follow `ARCHITECTURE.md §62 Development Phases`, plus a Phase 0 for setu
 | P4-06 | Backups: daily full + PITR; tested restore runbook | DS-14 | ⬜ | | Untested backup ≠ backup |
 | P4-07 | Queue recovery drill (Redis failure, no silent job loss) | DS-05 | ⬜ | | Design guarantees it; drill not yet run |
 | P4-08 | Production deployment (Nginx, Cloudflare, TLS, secret manager) | DS-14 | 🔄 | | Images, nginx and a production-mode compose run are verified. **Remaining:** real environment |
-| P4-09 | Verify all §68 Architecture Success Criteria | — | 🔄 | | 13 / 17 verified (see below) |
+| P4-09 | Verify all §68 Architecture Success Criteria | — | 🔄 | | 14 / 17 verified (see below) |
 | P4-10 | Restricted Redis ACL user for workers (rate-limit keys only) | ADR-004 | ⬜ | | Found during implementation |
 
 ---
@@ -168,7 +171,7 @@ Tick when verified by a test, drill, or measurement (link the evidence).
 - [x] Worker credentials are isolated: separate key and audience (`test_invalid_and_worker_tokens_rejected_on_user_api`)
 - [ ] Database backups are tested (P4-06)
 - [ ] Queue recovery is tested: lease recovery is tested; Redis-failure drill pending (P4-07)
-- [ ] Load testing validates the required throughput (target 1.5M/hour ≈ 416.67/sec) (P3-10)
+- [x] Load testing validates the required throughput (target 1.5M/hour ≈ 416.67/sec): measured 2,307 msgs/s with one worker, 4,803 msgs/s with three (`docs/PERFORMANCE.md`); large-scale multi-machine run still pending (P3-10)
 - [ ] Monitoring and alerting are operational (P4-04, P4-05)
 
 ---
@@ -177,8 +180,9 @@ Tick when verified by a test, drill, or measurement (link the evidence).
 
 | Suite | Result |
 |---|---|
-| Backend (`backend/tests`, real Postgres + Redis) | ✅ 53 passed |
-| Worker (`worker/tests`) | ✅ 17 passed |
+| Backend (`backend/tests`, real Postgres + Redis) | ✅ 54 passed |
+| Worker (`worker/tests`) | ✅ 29 passed |
+| Load test (`tests/load`) | ✅ 60k recipients: 2,307 / 3,734 / 4,803 msgs/s with 1 / 2 / 3 workers |
 | End-to-end (`tests/e2e`: uvicorn + scheduler + worker process + SMTP sink) | ✅ 1 passed (120 deliveries) |
 | Web (`packages/web-shared` vitest) | ✅ 9 passed; both apps typecheck and build |
 | Browser verification (Chromium, dev and production-mode Docker stack) | ✅ admin and user flows; 300 real deliveries through the containers |
@@ -192,7 +196,7 @@ Tick when verified by a test, drill, or measurement (link the evidence).
 | R-01 | Spec gap | `ARCHITECTURE.md` has no §19 or §59 (numbering skips) | Possibly missing requirements | Confirm with author whether content was lost (OQ-15) | Open |
 | R-02 | Spec gap | Campaign table has no content fields (HTML/text body, template) | Cannot send without them | Added `html_body`/`text_body` + merge variables (OQ-03) | Resolved |
 | R-03 | Spec gap | Tenancy model unspecified | Affects every table and query | User = tenant (OQ-01); add `organizations` later if needed | Resolved (default) |
-| R-04 | Throughput | 416.67/sec target depends on provider limits outside our control | Target may not be met | Configurable capacity model; load test pending (P3-10) | Open |
+| R-04 | Throughput | 416.67/sec target depends on provider limits outside our control | Target may not be met | Platform measured at 4.8k msgs/s; real-world rate = provider limits × `max_connections` (docs/PERFORMANCE.md) | Mitigated |
 | R-05 | Repo hygiene | A local Redis snapshot (`dump.rdb`, test data only) was committed in `e0d9add` and removed in `79d4439` | Low: no secrets, but it stays in history | Now in `.gitignore`; rewrite history only if the owner wants it | Accepted |
 | R-06 | Operations | Scheduler runs inside API replicas (leader lock) | A slow tick shares CPU with API requests | Split into its own process (P3-02) | Open |
 | R-07 | Compliance | Plain-SMTP providers without webhooks only report bounces seen during SMTP; asynchronous bounces and complaints are missed | Bounce/complaint suppression incomplete for those providers | DSN/FBL ingestion (P2-10) | Open |
@@ -220,6 +224,7 @@ Short record of decisions that changed scope or design. Full rationale lives in 
 
 Newest first. One line per completed task or significant change.
 
+- **2026-09-29**: Performance pass. Load-test harness; compiled message rendering (~110× faster per message), SMTP connection reuse across jobs, uvloop, provider *Max connections*, scheduler wake-up on start. 396 → 2,307 msgs/s per worker; 4,803 msgs/s with 3 workers. Fixed two bugs found by load testing: CSV row split at the 64 KB sample boundary, and bootstrap race with several API processes. (P3-10 partial, P3-13, P3-14)
 - **2026-09-29**: Docker images, nginx (strict CSP, login rate limits, separate worker-API listener), compose stack, CI workflow, docs (`docs/*.md`, README, CONTRIBUTING). Production-mode compose verified with 300 deliveries. (P0-07, P0-08, P0-12, P4-04/05/08 partial)
 - **2026-09-29**: Admin and User web apps with shared UI package; verified in Chromium against the real stack. Fixed from that verification: user dashboard "today" semantics, report refresh after completion, mobile nav accessible names. (P0-11, P1-20, P1-21)
 - **2026-09-29**: Delivery worker and the black-box end-to-end pipeline test. (P0-10, P1-15 … P1-18, P3-01)
@@ -232,7 +237,7 @@ Newest first. One line per completed task or significant change.
 ## Next up (recommended order)
 
 1. **P2-10**: bounce-mailbox DSN and ARF complaint parsing for SMTP-only providers (compliance gap R-07).
-2. **P3-10**: load test to validate the 416 msg/s target, then tune pool sizes and batch defaults.
+2. **P3-15**: SMTP PIPELINING, then the large multi-machine load test (P3-10).
 3. **P3-12 / P3-11**: retention jobs, then partitioning for high-volume tables.
 4. **P3-03**: SSE live updates (replace polling on the monitor and dashboards).
 5. **P3-04 / P3-05**: object-storage uploads and an out-of-API validation worker for very large lists.

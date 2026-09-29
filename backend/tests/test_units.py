@@ -100,3 +100,9 @@ def test_health_scoring() -> None:
     assert next_status(S.DEGRADED, 10, 1, cfg) == S.DEGRADED  # one bad window is not enough
     assert next_status(S.DEGRADED, 10, 3, cfg) == S.DISABLED
     assert next_status(S.DISABLED, 100, 0, cfg) == S.DISABLED  # manual re-enable only
+
+
+def test_csv_row_crossing_sample_boundary_is_not_split() -> None:
+    rows = [f"user{i}@example.org" for i in range(12000)]  # ~250 KB, crosses the 64 KB sample boundary
+    data = io.BytesIO(("email\n" + "\n".join(rows) + "\n").encode())
+    assert [e for e, _ in _rows(data)] == rows

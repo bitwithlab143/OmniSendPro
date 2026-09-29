@@ -15,10 +15,10 @@ credentials: they authenticate to the Worker API with a provisioned credential (
 | `REDIS_URL` | unset | Enables the shared per-provider rate limit (recommended with >1 worker) |
 | `WORKER_CAPACITY` | from admin | Max messages/sec for this node |
 | `WORKER_MAX_CONCURRENT_JOBS` | from admin | Parallel jobs |
-| `SMTP_CONNECTIONS_PER_JOB` | 4 | SMTP connection pool per job |
+| `SMTP_CONNECTIONS_PER_JOB` | 4 | Parallel SMTP sessions per job when the provider has no *Max connections* set |
 | `SMTP_TIMEOUT_SECONDS` | 30 | Per-operation timeout |
 
-`python worker.py` or the `worker` image. Stop with SIGTERM: the worker stops claiming, running jobs
+`python worker.py` or the `worker` image (uses uvloop when installed). Stop with SIGTERM: the worker stops claiming, running jobs
 report their results and release unsent recipients, then it sends an `offline` heartbeat.
 
 ## Lifecycle
@@ -43,6 +43,11 @@ report their results and release unsent recipients, then it sends an `offline` h
 Merge variables `{{column}}` from the CSV (HTML-escaped in HTML, CR/LF stripped in headers),
 `{{email}}`, `{{unsubscribe_url}}`. Every message has `List-Unsubscribe` + `List-Unsubscribe-Post:
 List-Unsubscribe=One-Click`; an unsubscribe footer is appended unless the template links it already.
+
+## Performance
+Messages are compiled once per job and rendered straight to wire bytes; authenticated SMTP
+connections are reused across jobs (per provider, closed after 60 s idle). The provider's
+*Max connections* setting decides how many SMTP sessions run in parallel. See `PERFORMANCE.md`.
 
 ## Scaling
 Add workers to add throughput; capacity is pull-based (a worker only claims when it has a free job

@@ -37,7 +37,7 @@ Read = Annotated[Principal, Depends(require("providers.read"))]
 Write = Annotated[Principal, Depends(require("providers.write"))]
 
 _TRACKED = ("provider_name", "host", "port", "username", "tls_mode", "from_email", "from_name",
-            "hourly_limit", "daily_limit", "per_second_limit")
+            "hourly_limit", "daily_limit", "per_second_limit", "max_connections")
 
 
 def serialize(p: Provider) -> ProviderOut:

@@ -75,6 +75,8 @@ def _rows(fileobj: IO[bytes]) -> Iterator[tuple[str, dict[str, str]]]:
     """Yield (email, variables) from a CSV byte stream. Accepts a header row or a single email column."""
     text = codecs.getreader("utf-8-sig")(fileobj, errors="replace")
     sample = text.read(64 * 1024)
+    if sample and not sample.endswith("\n"):
+        sample += text.readline()  # never split a row at the sample boundary
     if not sample.strip():
         raise bad_request("The recipient file is empty", "empty_file")
     try:

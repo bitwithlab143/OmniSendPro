@@ -8,7 +8,9 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import hashlib
 import ssl
+import time
 from email.message import EmailMessage
 from typing import Any
 
@@ -28,6 +30,8 @@ class SmtpProvider:
         self._all: list[aiosmtplib.SMTP] = []
         self._sem = asyncio.Semaphore(self.pool_size)
         self._tls = ssl.create_default_context()
+        self.last_used = time.monotonic()
+        self.users = 0  # jobs currently using this pool (shared pools only)
 
     async def _open(self) -> aiosmtplib.SMTP:
         client = aiosmtplib.SMTP(
@@ -45,7 +49,14 @@ class SmtpProvider:
         return client
 
     async def connect(self) -> None:
-        """Open one connection eagerly so auth/connection problems surface as a job-level failure."""
+        """Make sure one working connection exists, so auth/connection problems surface as a job-level
+        failure before any recipient is attempted. Reuses an idle connection when the pool has one."""
+        while not self._idle.empty():
+            client = self._idle.get_nowait()
+            if client.is_connected:
+                await self._idle.put(client)
+                return
+            self._discard(client)
         client = await self._open()
         await self._idle.put(client)
 
@@ -65,16 +76,25 @@ class SmtpProvider:
         with contextlib.suppress(Exception):
             client.close()
 
-    async def send(self, message: EmailMessage, sender: str, recipient: str) -> str | None:
+    @staticmethod
+    async def _transmit(client: aiosmtplib.SMTP, message: EmailMessage | bytes, sender: str,
+                        recipient: str) -> tuple[dict[str, Any], str]:
+        if isinstance(message, bytes):
+            # Pre-rendered wire bytes (fast path); aiosmtplib still applies dot-stuffing.
+            return await client.sendmail(sender, [recipient], message)
+        return await client.send_message(message, sender=sender, recipients=[recipient])
+
+    async def send(self, message: EmailMessage | bytes, sender: str, recipient: str) -> str | None:
+        self.last_used = time.monotonic()
         async with self._sem:
             client = await self._checkout()
             try:
-                errors, response = await client.send_message(message, sender=sender, recipients=[recipient])
+                errors, response = await self._transmit(client, message, sender, recipient)
             except (aiosmtplib.SMTPServerDisconnected, aiosmtplib.SMTPConnectError, ConnectionError):
                 self._discard(client)
                 client = await self._open()  # one reconnect, then let the caller classify
                 try:
-                    errors, response = await client.send_message(message, sender=sender, recipients=[recipient])
+                    errors, response = await self._transmit(client, message, sender, recipient)
                 except BaseException:
                     self._discard(client)
                     raise
@@ -98,3 +118,52 @@ class SmtpProvider:
             with contextlib.suppress(Exception):
                 await asyncio.wait_for(client.quit(), timeout=5)
             self._discard(client)
+
+
+class SmtpPoolRegistry:
+    """Keeps one connection pool per provider configuration for the life of the worker process.
+
+    Consecutive jobs for the same provider reuse already-open (and already-authenticated) connections
+    instead of paying TCP + TLS + AUTH again for every job. The pool is keyed by the full connection
+    configuration including a password fingerprint, so a rotated credential gets a fresh pool.
+    """
+
+    def __init__(self, max_connections: int, timeout: float, idle_ttl: float = 60.0) -> None:
+        self.max_connections = max(1, max_connections)
+        self.timeout = timeout
+        self.idle_ttl = idle_ttl
+        self._pools: dict[tuple[Any, ...], SmtpProvider] = {}
+
+    @staticmethod
+    def _key(config: dict[str, Any]) -> tuple[Any, ...]:
+        secret = hashlib.sha256((config.get("password") or "").encode()).hexdigest()
+        return (config.get("id"), config["host"], int(config["port"]), config.get("username"),
+                config.get("tls_mode", "starttls"), secret, config.get("max_connections"))
+
+    def acquire(self, config: dict[str, Any]) -> SmtpProvider:
+        key = self._key(config)
+        pool = self._pools.get(key)
+        if pool is None:
+            # A provider's own connection limit caps the pool shared by every job on this worker.
+            size = int(config.get("max_connections") or self.max_connections)
+            pool = self._pools[key] = SmtpProvider(config, pool_size=size, timeout=self.timeout)
+        pool.users += 1
+        pool.last_used = time.monotonic()
+        return pool
+
+    def release(self, pool: SmtpProvider) -> None:
+        pool.users = max(0, pool.users - 1)
+        pool.last_used = time.monotonic()
+
+    async def sweep(self) -> None:
+        """Close pools nobody used for ``idle_ttl`` seconds (providers keep idle sessions short)."""
+        now = time.monotonic()
+        for key, pool in list(self._pools.items()):
+            if pool.users == 0 and now - pool.last_used > self.idle_ttl:
+                del self._pools[key]
+                await pool.close()
+
+    async def close(self) -> None:
+        for pool in list(self._pools.values()):
+            await pool.close()
+        self._pools.clear()

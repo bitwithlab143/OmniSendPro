@@ -34,6 +34,7 @@ export interface Provider {
   hourly_limit: number | null;
   daily_limit: number | null;
   per_second_limit: number | null;
+  max_connections: number | null;
   status: "ACTIVE" | "WARNING" | "DEGRADED" | "DISABLED";
   status_reason: string | null;
   health_score: number;

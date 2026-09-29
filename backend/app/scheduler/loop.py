@@ -85,15 +85,29 @@ class Scheduler:
         ttl = max(15, int(interval * 3))
         log.info("scheduler_started", extra={"identity": self.identity})
         while not self._stop.is_set():
+            leader = False
             try:
-                if await self._acquire(Keys.SCHEDULER_LOCK, ttl):
+                leader = await self._acquire(Keys.SCHEDULER_LOCK, ttl)
+                if leader:
                     stats = await self.tick()
                     if any(stats.values()):
                         log.info("scheduler_tick", extra=stats)
             except Exception:  # noqa: BLE001 - never let the loop die
                 log.exception("scheduler_tick_failed")
-            with contextlib.suppress(TimeoutError):
-                await asyncio.wait_for(self._stop.wait(), timeout=interval)
+            await self._wait(interval, leader)
+
+    async def _wait(self, interval: float, leader: bool) -> None:
+        """Sleep until the next tick. The leader also wakes early when a campaign is started/resumed
+        (``wake()``), so new campaigns begin sending within milliseconds instead of a full interval."""
+        if leader and not self._stop.is_set():
+            try:
+                await get_redis().blpop([Keys.SCHEDULER_WAKE], timeout=interval)
+                await get_redis().delete(Keys.SCHEDULER_WAKE)  # coalesce bursts of wake-ups
+                return
+            except Exception:  # noqa: BLE001 - fall back to a plain sleep if Redis is unavailable
+                log.warning("scheduler_wake_unavailable")
+        with contextlib.suppress(TimeoutError):
+            await asyncio.wait_for(self._stop.wait(), timeout=interval)
 
     def start(self) -> None:
         self._task = asyncio.create_task(self.run(), name="omnisend-scheduler")
@@ -105,3 +119,11 @@ class Scheduler:
                 await asyncio.wait_for(self._task, timeout=10)
         with contextlib.suppress(Exception):
             await get_redis().eval(_RELEASE_LUA, 1, Keys.SCHEDULER_LOCK, self.identity)
+
+
+async def wake() -> None:
+    """Ask the scheduler leader to run a tick now (best effort)."""
+    with contextlib.suppress(Exception):
+        redis = get_redis()
+        await redis.lpush(Keys.SCHEDULER_WAKE, "1")
+        await redis.ltrim(Keys.SCHEDULER_WAKE, 0, 0)

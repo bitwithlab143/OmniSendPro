@@ -8,6 +8,7 @@ dependencies = [
     "aiosmtplib>=3.0",
     "redis>=5.2",
     "psutil>=5.9",
+    "uvloop>=0.19; sys_platform != 'win32'",
 ]
 
 [project.optional-dependencies]

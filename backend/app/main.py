@@ -18,7 +18,7 @@ from app.core.config import get_settings
 from app.core.errors import install_error_handlers
 from app.core.logging import configure_logging
 from app.core.redis import close_redis, get_redis
-from app.db.session import dispose_engine, sessionmaker
+from app.db.session import dispose_engine, get_engine, sessionmaker
 from app.models import Job, Provider, Worker
 from app.models.enums import JobStatus, ProviderStatus, WorkerStatus
 from app.scheduler.loop import Scheduler
@@ -27,14 +27,23 @@ from app.services import jobs as job_service
 
 log = logging.getLogger("omnisend.api")
 VERSION = "0.1.0"
+BOOTSTRAP_LOCK = 815_001  # pg advisory lock id for startup bootstrap
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     settings = get_settings()
-    async with sessionmaker()() as db:
-        await bootstrap.ensure_reference_data(db)
-        await bootstrap.bootstrap_admin_from_env(db)
+    # Several API processes/replicas start at once: serialise first-boot work with an advisory lock held
+    # on a dedicated connection (released even if bootstrap fails).
+    async with get_engine().connect() as lock_conn:
+        await lock_conn.execute(text("SELECT pg_advisory_lock(:k)"), {"k": BOOTSTRAP_LOCK})
+        try:
+            async with sessionmaker()() as db:
+                await bootstrap.ensure_reference_data(db)
+                await bootstrap.bootstrap_admin_from_env(db)
+        finally:
+            await lock_conn.execute(text("SELECT pg_advisory_unlock(:k)"), {"k": BOOTSTRAP_LOCK})
+            await lock_conn.commit()
     scheduler: Scheduler | None = None
     if settings.run_scheduler:
         scheduler = Scheduler()

@@ -13,17 +13,21 @@ from typing import Any
 
 from app.config import WorkerConfig
 from app.health.metrics import RateMeter
-from app.providers.smtp import SmtpProvider
+from app.providers.smtp import SmtpPoolRegistry, SmtpProvider
 from app.queue.client import ApiClient, StaleAttemptError
 from app.rate_limit.bucket import LocalBucket, RedisBucket, Unlimited
 from app.reporting.buffer import ResultBuffer
 from app.retry.classify import Classified, classify_exception
-from app.sender.message import build
+from app.sender.message import CompiledCampaign
 
 log = logging.getLogger("worker.job")
 
 # Consecutive per-recipient connection/timeout errors after which the job is treated as a systemic failure.
 SYSTEMIC_STREAK = 5
+
+
+def provider_is_smtp(config: dict[str, Any]) -> bool:
+    return config.get("type", "smtp") == "smtp"
 
 
 class JobAborted(Exception):
@@ -34,7 +38,8 @@ class JobAborted(Exception):
 
 class JobRunner:
     def __init__(self, api: ApiClient, config: WorkerConfig, job: dict[str, Any], meter: RateMeter,
-                 worker_bucket: LocalBucket | Unlimited, redis: Any = None, provider_factory: Any = None) -> None:
+                 worker_bucket: LocalBucket | Unlimited, redis: Any = None, provider_factory: Any = None,
+                 pools: SmtpPoolRegistry | None = None) -> None:
         self.api = api
         self.config = config
         self.job = job
@@ -46,6 +51,7 @@ class JobRunner:
         self.provider_factory = provider_factory or (
             lambda cfg: SmtpProvider(cfg, pool_size=config.smtp_connections_per_job, timeout=config.send_timeout)
         )
+        self.pools = pools
         self.stop_requested = asyncio.Event()
         self.lease_seconds = 120
         self._error_streak = 0
@@ -83,8 +89,10 @@ class JobRunner:
     async def run(self) -> str:
         started = time.monotonic()
         campaign = self.job["campaign"]
+        compiled = CompiledCampaign(campaign)
         recipients = self.job["recipients"]
-        provider = self.provider_factory(self.job["provider"])
+        shared = self.pools is not None and provider_is_smtp(self.job["provider"])
+        provider = self.pools.acquire(self.job["provider"]) if shared else self.provider_factory(self.job["provider"])
         buffer = ResultBuffer(lambda batch: self.api.results(self.job_id, self.attempt_id, batch),
                               size=self.config.result_flush_size, interval=self.config.result_flush_interval)
         lease_task = asyncio.create_task(self._lease_loop())
@@ -111,9 +119,11 @@ class JobRunner:
                     await self.worker_bucket.acquire()
                     if self.stop_requested.is_set():
                         return
-                    await buffer.add(await self._send_one(provider, campaign, recipient))
+                    await buffer.add(await self._send_one(provider, compiled, recipient))
 
-            concurrency = max(1, min(self.config.smtp_connections_per_job, len(recipients)))
+            # Parallel SMTP sessions for this job: the provider's policy wins over the worker default.
+            per_job = int(self.job["provider"].get("max_connections") or self.config.smtp_connections_per_job)
+            concurrency = max(1, min(per_job, len(recipients)))
             senders = [asyncio.create_task(sender_loop()) for _ in range(concurrency)]
             try:
                 await asyncio.gather(*senders)
@@ -153,8 +163,11 @@ class JobRunner:
             lease_task.cancel()
             with contextlib.suppress(asyncio.CancelledError, Exception):
                 await lease_task
-            with contextlib.suppress(Exception):
-                await provider.close()
+            if shared:
+                self.pools.release(provider)  # keep authenticated connections for the next job
+            else:
+                with contextlib.suppress(Exception):
+                    await provider.close()
         log.info("job_finished", extra={"job_id": self.job_id, "outcome": outcome, "recipients": len(recipients),
                                         "reported": buffer.reported,
                                         "duration_ms": int((time.monotonic() - started) * 1000)})
@@ -167,14 +180,14 @@ class JobRunner:
             await self.api.failure(self.job_id, self.attempt_id, error_code=code, error_message=c.message or category,
                                    transient=c.transient, category=category)
 
-    async def _send_one(self, provider: Any, campaign: dict[str, Any], recipient: dict[str, Any]) -> dict[str, Any]:
+    async def _send_one(self, provider: Any, compiled: CompiledCampaign, recipient: dict[str, Any]) -> dict[str, Any]:
         base = {"recipient_id": recipient["id"]}
         try:
-            message, message_id = build(campaign, recipient)
+            message, message_id = compiled.render(recipient)
         except (ValueError, UnicodeError, KeyError) as exc:
             return {**base, "outcome": "failed", "category": "invalid", "error_message": str(exc)[:500]}
         try:
-            await provider.send(message, campaign["from_email"], recipient["email"])
+            await provider.send(message, compiled.from_email, recipient["email"])
         except Exception as exc:  # noqa: BLE001 - classified below
             c = classify_exception(exc)
             if c.systemic:

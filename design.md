@@ -5,7 +5,7 @@
 > - Work tracking: [`PROGRESS.md`](./PROGRESS.md). Each task there references the `DS-xx` / `ADR-xxx` item it implements.
 
 **Last updated:** 2026-09-29
-**Document version:** 0.2.0
+**Document version:** 0.3.0
 
 ---
 
@@ -682,6 +682,20 @@ relative to the repository root.
 17. **nginx** serves both panels (user :8080, admin :8081) and a worker-API-only listener (:8082).
     The panels return 404 for `/api/v1/worker/*`, and inline scripts are forbidden by CSP.
 
+18. **Worker message rendering (v0.3.0).** `CompiledCampaign` builds the constant headers and MIME
+    skeleton once per job and renders each recipient straight to wire bytes (base64 bodies, CRLF,
+    RFC 2047 only when needed, boundary starting with `=_` which base64 cannot contain). The reference
+    `EmailMessage` builder remains the oracle in tests and the path for non-ASCII addresses (SMTPUTF8).
+19. **SMTP connection reuse (v0.3.0).** `SmtpPoolRegistry` keeps one pool per provider configuration
+    (incl. password fingerprint and `max_connections`) for the life of the worker process.
+20. **Provider `max_connections` (v0.3.0, migration 0002).** Simultaneous SMTP sessions one worker opens
+    to the provider; overrides `SMTP_CONNECTIONS_PER_JOB` and caps the shared pool. It is per worker,
+    not global: providers usually limit per client IP.
+21. **Scheduler wake-up (v0.3.0).** Start/resume pushes `wake:scheduler`; only the lock holder waits on
+    it (BLPOP with the tick interval as timeout), so non-leaders cannot swallow a wake-up.
+22. **Startup bootstrap lock.** Reference data and the bootstrap admin run under a PostgreSQL advisory
+    lock so several API processes can start simultaneously.
+
 ### Not yet implemented (tracked in PROGRESS.md)
 DSN/ARF bounce and complaint ingestion (P2-10), API keys (P2-15), SSE (P3-03), object-storage
 uploads (P3-04/05), a dedicated scheduler and event-processor process (P3-02/06), partitioning and
@@ -693,5 +707,6 @@ retention (P3-11/12), and Phase 4 hardening.
 
 Newest first.
 
+- **2026-09-29 · v0.3.0**: Performance pass — implementation notes 18–22 (compiled messages, SMTP pool reuse, provider `max_connections`, scheduler wake-up, bootstrap lock). Measurements in `docs/PERFORMANCE.md`.
 - **2026-09-29 · v0.2.0**: Implemented DS-01…DS-15 and ADR-001…ADR-010. OQ-01…OQ-14 adopted as defaults. Added §Implementation notes (code map + 17 refinements).
 - **2026-09-29 · v0.1.0**: Initial design document extracted from `ARCHITECTURE.md`. Added DS-01…DS-15, proposed ADR-001…ADR-010, and logged OQ-01…OQ-15.

@@ -112,6 +112,12 @@ async def effective_batch_size(db: AsyncSession, campaign: Campaign, provider: P
     return max(1, min(caps))
 
 
+async def _wake_scheduler() -> None:
+    from app.scheduler.loop import wake  # local import: the scheduler imports this module
+
+    await wake()
+
+
 # --------------------------------------------------------------------------- state transitions
 
 
@@ -151,6 +157,7 @@ async def start(db: AsyncSession, campaign: Campaign, ctx: RequestContext, conse
                  new={"batch_size": campaign.batch_size, "recipients": campaign.total_recipients})
     await db.commit()
     await db.refresh(campaign)
+    await _wake_scheduler()
     return campaign
 
 
@@ -177,6 +184,7 @@ async def resume(db: AsyncSession, campaign: Campaign, ctx: RequestContext) -> C
     audit.record(db, ctx, "CAMPAIGN_RESUMED", "campaign", campaign.id)
     await db.commit()
     await db.refresh(campaign)
+    await _wake_scheduler()
     return campaign
 
 

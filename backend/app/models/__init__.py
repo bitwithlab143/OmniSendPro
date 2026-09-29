@@ -166,6 +166,8 @@ class Provider(TimestampMixin, Base):
     hourly_limit: Mapped[int | None] = mapped_column(Integer)
     daily_limit: Mapped[int | None] = mapped_column(Integer)
     per_second_limit: Mapped[int | None] = mapped_column(Integer)
+    # Max simultaneous SMTP connections one worker opens to this provider (provider policy). None = worker default.
+    max_connections: Mapped[int | None] = mapped_column(Integer)
     status: Mapped[ProviderStatus] = mapped_column(
         enum_col(ProviderStatus, "provider_status"), default=ProviderStatus.ACTIVE, index=True
     )

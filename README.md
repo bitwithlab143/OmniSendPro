@@ -19,7 +19,7 @@ Admin / User web ──► Control API (FastAPI) ──► PostgreSQL (source of
 | [`ARCHITECTURE.md`](./ARCHITECTURE.md) | Target architecture (baseline spec) |
 | [`design.md`](./design.md) | Concrete designs, ADRs, resolved questions |
 | [`PROGRESS.md`](./PROGRESS.md) | What is done / in progress / next |
-| [`docs/`](./docs) | API, database, worker, deployment, security, testing guides |
+| [`docs/`](./docs) | API, database, worker, deployment, security, testing, performance guides |
 
 ## What's in the box
 
@@ -87,13 +87,19 @@ Alternatively create an admin from the CLI: `cd backend && ../.venv/bin/python -
 ## Tests
 
 ```bash
-(cd backend && ../.venv/bin/pytest -q)   # 53 integration + unit tests (real Postgres & Redis)
-(cd worker  && ../.venv/bin/pytest -q)   # 17 unit tests
+(cd backend && ../.venv/bin/pytest -q)   # 54 integration + unit tests (real Postgres & Redis)
+(cd worker  && ../.venv/bin/pytest -q)   # 29 unit tests
 .venv/bin/pytest tests/e2e -q             # full pipeline with a real SMTP sink
 npm run typecheck && npm test && npm run build
 ```
 
 See [`docs/TESTING.md`](./docs/TESTING.md) for environment variables and what each suite covers.
+
+## Performance
+
+On a single 4-vCPU machine running everything, one worker sends ~2,300 msgs/s and three workers
+~4,800 msgs/s (~17M/hour) to a local sink. With real providers, throughput is set by provider limits
+and the provider's *Max connections*. Tuning guide and load test: [`docs/PERFORMANCE.md`](./docs/PERFORMANCE.md).
 
 ## Compliance
 
