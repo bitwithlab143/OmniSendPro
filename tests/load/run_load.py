@@ -116,7 +116,8 @@ async def main(args: argparse.Namespace) -> None:
             csv = "email,first_name\n" + "\n".join(f"u{i}@load.example,Name{i}" for i in range(args.recipients))
             t0 = time.perf_counter()
             r = await c.post(f"/api/v1/user/campaigns/{cid}/recipients", headers=user,
-                             files={"file": ("l.csv", csv.encode(), "text/csv")})
+                             files={"file": ("l.csv", csv.encode(), "text/csv")},
+                             timeout=args.timeout)  # large direct uploads import inside the request
             upload_s = time.perf_counter() - t0
             assert r.json()["imported"] == args.recipients, r.text
             r = await c.post(f"/api/v1/user/campaigns/{cid}/start", headers=user, json={"consent_confirmed": True})

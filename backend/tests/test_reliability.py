@@ -229,3 +229,36 @@ async def test_disabled_worker_cannot_work(client: AsyncClient, admin: Session) 
     assert (await client.post("/api/v1/worker/jobs/claim", headers=worker)).status_code == 401
     r = await client.post("/api/v1/worker/token", json={"worker_id": "worker-001", "credential": "wrong"})
     assert r.status_code == 401
+
+
+async def test_concurrent_acks_allocate_unique_retry_batches(client: AsyncClient, admin: Session,
+                                                             user: Session) -> None:
+    """Regression (found by the 500k load test): workers finishing jobs of one campaign at the same time
+    must not both pick the same next batch number for their retry batches."""
+    import asyncio
+
+    _, campaign = await _started(client, admin, user, n=16, batch_size=2)
+    workers = [await provision_worker(client, admin, worker_id=f"race-{i}") for i in range(2)]
+    jobs = []
+    for w in workers:
+        for _ in range(4):
+            job = (await client.post("/api/v1/worker/jobs/claim", headers=w)).json()
+            jobs.append((w, job))
+            rs = job["recipients"]
+            await client.post(f"/api/v1/worker/jobs/{job['job_id']}/results", headers=w, json={
+                "attempt_id": job["attempt_id"],
+                "results": [{"recipient_id": rs[0]["id"], "outcome": "sent", "provider_message_id": uuid.uuid4().hex},
+                            {"recipient_id": rs[1]["id"], "outcome": "failed", "smtp_code": 451,
+                             "category": "transient"}]})
+    responses = await asyncio.gather(*(
+        client.post(f"/api/v1/worker/jobs/{job['job_id']}/ack", headers=w, json={"attempt_id": job["attempt_id"]})
+        for w, job in jobs))
+    assert [r.status_code for r in responses] == [200] * len(jobs), [r.text for r in responses if r.status_code != 200]
+    assert all(r.json()["requeued"] == 1 for r in responses)
+    from app.db.session import sessionmaker
+    from app.models import CampaignBatch
+
+    async with sessionmaker()() as db:
+        seqs = (await db.execute(select(CampaignBatch.sequence_no).where(
+            CampaignBatch.campaign_id == campaign["id"], CampaignBatch.retry_round == 1))).scalars().all()
+    assert len(seqs) == len(jobs) and len(set(seqs)) == len(seqs)

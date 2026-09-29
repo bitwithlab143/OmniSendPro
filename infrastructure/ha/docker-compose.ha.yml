@@ -1,0 +1,58 @@
+# Reference HA data tier for testing failover locally (design DS-23, P4-01/P4-02).
+#   docker compose -f infrastructure/ha/docker-compose.ha.yml up -d
+# Production: prefer managed PostgreSQL / Patroni and a managed Redis with Sentinel; this file shows the
+# moving parts and lets you rehearse (replication lag, Sentinel failover) before relying on them.
+#
+# App settings for this stack:
+#   DATABASE_URL=postgresql+asyncpg://omnisend:omnisend@pg-primary:5432/omnisend
+#   DATABASE_READ_URL=postgresql+asyncpg://omnisend:omnisend@pg-replica:5432/omnisend
+#   REDIS_URL=redis://redis-a:6379/0  REDIS_SENTINELS=sentinel-1:26379,sentinel-2:26379,sentinel-3:26379
+name: omnisend-ha
+
+x-sentinel: &sentinel
+  image: redis:7-alpine
+  command: ["sh", "-c", "cp /cfg/sentinel.conf /tmp/s.conf && exec redis-server /tmp/s.conf --sentinel"]
+  volumes: [./sentinel.conf:/cfg/sentinel.conf:ro]
+  depends_on: [redis-a, redis-b]
+
+services:
+  pg-primary:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: omnisend
+      POSTGRES_PASSWORD: omnisend
+      POSTGRES_DB: omnisend
+      REPLICATION_PASSWORD: replicator
+    command: ["postgres", "-c", "wal_level=replica", "-c", "max_wal_senders=10", "-c", "wal_keep_size=512MB",
+              "-c", "hot_standby=on"]
+    volumes: [./pg-primary-init.sh:/docker-entrypoint-initdb.d/10-replication.sh:ro]
+    healthcheck: { test: ["CMD-SHELL", "pg_isready -U omnisend"], interval: 2s, retries: 30 }
+
+  pg-replica:
+    image: postgres:16-alpine
+    user: postgres
+    environment: { PGPASSWORD: replicator }
+    depends_on: { pg-primary: { condition: service_healthy } }
+    entrypoint: ["sh", "-c"]
+    command:
+      - |
+        set -e
+        export PGDATA=/var/lib/postgresql/data
+        if [ ! -s "$$PGDATA/PG_VERSION" ]; then
+          rm -rf "$$PGDATA"/*
+          pg_basebackup -h pg-primary -U replicator -D "$$PGDATA" -X stream -R -S replica_1 -C
+          chmod 700 "$$PGDATA"
+        fi
+        exec postgres -c hot_standby=on
+    healthcheck: { test: ["CMD-SHELL", "pg_isready -U omnisend"], interval: 2s, retries: 60 }
+
+  redis-a:
+    image: redis:7-alpine
+    command: ["redis-server", "--appendonly", "yes"]
+  redis-b:
+    image: redis:7-alpine
+    command: ["redis-server", "--appendonly", "yes", "--replicaof", "redis-a", "6379"]
+    depends_on: [redis-a]
+  sentinel-1: *sentinel
+  sentinel-2: *sentinel
+  sentinel-3: *sentinel

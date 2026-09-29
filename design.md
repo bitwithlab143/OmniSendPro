@@ -5,7 +5,7 @@
 > - Work tracking: [`PROGRESS.md`](./PROGRESS.md). Each task there references the `DS-xx` / `ADR-xxx` item it implements.
 
 **Last updated:** 2026-09-29
-**Document version:** 0.6.0
+**Document version:** 0.7.0
 
 ---
 
@@ -54,7 +54,7 @@
 | [DS-20](#ds-20-real-time-updates-sse) | Real-time updates (SSE) | Implemented | §42, ADR-009, P3-03 |
 | [DS-21](#ds-21-large-recipient-files-object-storage--import-worker) | Large recipient files: object storage & import worker | Implemented | §55, P3-04, P3-05 |
 | [DS-22](#ds-22-smtp-pipelining--chunking) | SMTP pipelining & chunking | Implemented | §20, P3-15 |
-| [DS-23](#ds-23-production-hardening-ha-dr-scaling--observability) | Production hardening: HA, DR, scaling & observability | Accepted | §37–§46, Phase 4 |
+| [DS-23](#ds-23-production-hardening-ha-dr-scaling--observability) | Production hardening: HA, DR, scaling & observability | Implemented | §37–§46, Phase 4 |
 | [DS-24](#ds-24-email-template-tags) | Email template tags (#USERID#, #INVOICE#, …) | Implemented | §51, user request |
 
 ---
@@ -601,7 +601,7 @@ Programmatic access for integrations (CRM, data pipelines) to the **User API** o
 
 ## DS-18 Data lifecycle: partitioning & retention
 
-**Status:** Accepted (2026-09-29) — tasks P3-11, P3-12.
+**Status:** Implemented (2026-09-29) — tasks P3-11, P3-12.
 
 High-volume, append-only tables are **range-partitioned** by their timestamp. Retention works by dropping
 whole partitions, which is instant and never bloats the table.
@@ -635,7 +635,7 @@ whole partitions, which is instant and never bloats the table.
 
 ## DS-19 Background runtime: scheduler & processor processes
 
-**Status:** Accepted (2026-09-29) — tasks P3-02, P3-05, P3-06.
+**Status:** Implemented (2026-09-29) — tasks P3-02, P3-05, P3-06.
 
 `python -m app.runner <roles…>` runs background roles outside the API (compose service `scheduler`).
 The API runs the same roles in-process when `RUN_SCHEDULER=true` (development default), so a single
@@ -663,7 +663,7 @@ Graceful shutdown: SIGTERM stops claiming, finishes the current batch, and relea
 
 ## DS-20 Real-time updates (SSE)
 
-**Status:** Accepted (2026-09-29) — task P3-03, implements ADR-009.
+**Status:** Implemented (2026-09-29) — task P3-03, implements ADR-009.
 
 - Endpoints (`text/event-stream`, `Cache-Control: no-store`, `X-Accel-Buffering: no`):
   - `GET /user/campaigns/{id}/stream`, `GET /user/dashboard/stream`
@@ -684,7 +684,7 @@ Graceful shutdown: SIGTERM stops claiming, finishes the current batch, and relea
 
 ## DS-21 Large recipient files: object storage & import worker
 
-**Status:** Accepted (2026-09-29) — tasks P3-04, P3-05.
+**Status:** Implemented (2026-09-29) — tasks P3-04, P3-05.
 
 - Optional S3-compatible storage (AWS S3, Cloudflare R2, MinIO): `OBJECT_STORAGE_ENDPOINT`,
   `OBJECT_STORAGE_BUCKET`, `OBJECT_STORAGE_REGION`, `OBJECT_STORAGE_ACCESS_KEY`, `OBJECT_STORAGE_SECRET_KEY`,
@@ -712,7 +712,7 @@ Graceful shutdown: SIGTERM stops claiming, finishes the current batch, and relea
 
 ## DS-22 SMTP pipelining & chunking
 
-**Status:** Accepted (2026-09-29) — task P3-15.
+**Status:** Implemented (2026-09-29) — task P3-15.
 
 With one recipient per message (needed for per-recipient unsubscribe and tracking), a classic SMTP
 transaction costs four round trips: MAIL, RCPT, DATA, then the message body. On a 50 ms link that caps one
@@ -735,7 +735,7 @@ connection at about 5 messages/s.
 
 ## DS-23 Production hardening: HA, DR, scaling & observability
 
-**Status:** Accepted (2026-09-29) — Phase 4.
+**Status:** Implemented (2026-09-29) — Phase 4.
 
 **Database (P4-01).** Primary plus streaming replica. The app accepts `DATABASE_READ_URL`: reports, report
 exports and dashboards read from it (tolerating replication lag). Everything else, including anything
@@ -1054,10 +1054,20 @@ relative to the repository root.
 26. **`useAction({ failed })`.** Operations that report failure in a 200 body (connection tests, mailbox
     polls) show an error toast instead of a success toast.
 
+27. **Webhooks answer 202 (DS-19).** Delivery webhooks and raw reports return `{"queued", "rejected"}` instead of
+    the processing result; the result is stored on the `event_inbox` row. Providers only need a 2xx.
+28. **Pool instances age from creation.** Pruning uses `COALESCE(last_heartbeat_at, created_at)`: an instance
+    that just exchanged its token but has not registered yet must not be deleted (found by the pool tests).
+29. **Sentinel discovers replicas from the master's INFO** (every 10 s). The failover test waits for
+    `SENTINEL REPLICAS` before killing the master; operators should likewise check Sentinel sees the replica.
+30. **OpenTelemetry + SQLAlchemy 2.1.** The SQLAlchemy instrumentation's version gate stops at < 2.1; it is
+    enabled with `skip_dep_check=True` and a test asserts SQL spans are produced.
+31. **Worker token buckets moved to `rl:provider:*`** so the worker Redis ACL does not overlap the API's
+    `ratelimit:*` keys (login, unsubscribe, API keys).
+
 ### Not yet implemented (tracked in PROGRESS.md)
-SSE (P3-03), object-storage
-uploads (P3-04/05), a dedicated scheduler and event-processor process (P3-02/06), partitioning and
-retention (P3-11/12), and Phase 4 hardening.
+A multi-machine 500k–1M load run (P3-10 was run on one machine), and a real production environment
+(P4-08: the deployment artefacts exist; provisioning is an operator task).
 
 ---
 
@@ -1065,6 +1075,7 @@ retention (P3-11/12), and Phase 4 hardening.
 
 Newest first.
 
+- **2026-09-29 · v0.7.0**: DS-23 implemented (pools/autoscaling, Sentinel, read replica, backups + drills, Redis ACL, monitoring, tracing, Kubernetes manifests); notes 27–31.
 - **2026-09-29 · v0.6.0**: DS-18…DS-22 implemented; added DS-24 (email template tags).
 
 - **2026-09-29 · v0.5.0**: Phase 3/4 designs: DS-18 (partitioning & retention), DS-19 (scheduler/processor processes, event inbox), DS-20 (SSE), DS-21 (object storage & import worker), DS-22 (SMTP pipelining/chunking), DS-23 (HA, DR, autoscaling, observability, Redis ACL, deployment); ADR-013…ADR-016.

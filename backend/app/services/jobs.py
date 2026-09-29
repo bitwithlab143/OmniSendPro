@@ -535,6 +535,9 @@ async def _requeue_leftovers(db: AsyncSession, job: Job, cfg: dict[str, Any]) ->
 
     batch = await db.get(CampaignBatch, job.batch_id)
     assert batch is not None
+    # Two workers finishing jobs of the same campaign at once would both pick max+1: serialise sequence
+    # allocation on the campaign row (the same lock the counter updates take, so no new lock ordering).
+    await db.execute(select(Campaign.id).where(Campaign.id == job.campaign_id).with_for_update())
     seq = int(
         (await db.execute(select(func.max(CampaignBatch.sequence_no))
                           .where(CampaignBatch.campaign_id == job.campaign_id))).scalar_one()

@@ -6,8 +6,8 @@
 > - [`design.md`](./design.md): concrete design decisions, data models, state machines, API contracts, UI screens (the "how").
 
 **Last updated:** 2026-09-29
-**Current phase:** Phase 2 (Reliability & Compliance) is complete; Phase 3 (Scale & Real-time) is in progress
-**Overall status:** 🟢 MVP implemented and tested end to end; performance pass done (≈5× per worker, 17M/hour measured)
+**Current phase:** Phases 0–2 complete; Phase 3 complete except a multi-machine load run; Phase 4 complete except provisioning a real production environment
+**Overall status:** 🟢 Production-ready code base: HA/DR/autoscaling/observability implemented and drilled; all 17 §68 success criteria verified
 
 ---
 
@@ -47,7 +47,7 @@ Phases follow `ARCHITECTURE.md §62 Development Phases`, plus a Phase 0 for setu
 | **Phase 1**: MVP | Admin/User login, campaigns, provider management, basic queue, single worker, basic sending & reports | ✅ | 22 / 22 |
 | **Phase 2**: Reliability & Compliance | Batch processing, retries, worker monitoring, provider health, suppression, audit logs | ✅ | 15 / 15 |
 | **Phase 3**: Scale & Real-time | Multiple workers, horizontal scaling, real-time dashboard, advanced reports, object storage, event processing | 🔄 | 15 / 16 (P3-10 large multi-machine run left) |
-| **Phase 4**: Production Hardening | HA, DB replication, queue HA, autoscaling, observability, disaster recovery | 🔄 | 0 / 10 (4 partial) |
+| **Phase 4**: Production Hardening | HA, DB replication, queue HA, autoscaling, observability, disaster recovery | 🔄 | 9 / 10 (P4-08 needs a real environment) |
 
 ---
 
@@ -128,7 +128,7 @@ Phases follow `ARCHITECTURE.md §62 Development Phases`, plus a Phase 0 for setu
 | P3-07 | Advanced reports: bounce, complaint, per-user, per-provider | DS-09 | ✅ | 2026-09-29 | Rates plus per-user and per-provider breakdowns |
 | P3-08 | Cursor-based pagination across all list endpoints | DS-09 | ✅ | 2026-09-29 | |
 | P3-09 | Metrics endpoint (Prometheus) for backend & workers | DS-15 | ✅ | 2026-09-29 | Backend `/metrics`; worker metrics arrive through heartbeats |
-| P3-10 | Load test: 10k jobs, 100k / 500k / 1M recipients | DS-15 | 🔄 | 2026-09-29 | `tests/load/run_load.py` + results in `docs/PERFORMANCE.md` (up to 60k recipients, 1–3 workers, simulated latency). **Remaining:** 500k–1M run on separate machines |
+| P3-10 | Load test: 10k jobs, 100k / 500k / 1M recipients | DS-15 | 🔄 | 2026-09-29 | `tests/load/run_load.py` + `docs/PERFORMANCE.md`: 500k recipients on one machine, 3 workers: 500,000 sent, 0 failed, 4,743 msgs/s (found and fixed a retry-batch numbering race). **Remaining:** 1M run across separate machines |
 | P3-11 | Table partitioning for email_events / heartbeats / health logs / audit logs | DS-03, DS-18, ADR-013 | ✅ | 2026-09-29 | Migration 0005: monthly (events, audit, health) and daily (heartbeats) range partitions + DEFAULT partition; event dedupe moved to `email_event_keys` |
 | P3-12 | Retention/cleanup jobs for heartbeats, health logs, expired refresh tokens | DS-18 | ✅ | 2026-09-29 | Hourly maintenance: creates partitions ahead (moving any default-partition rows), drops expired partitions per `retention_*_days` settings, prunes refresh tokens and dedupe keys |
 | P3-13 | Worker throughput: compiled messages, SMTP connection reuse across jobs, uvloop | DS-08 | ✅ | 2026-09-29 | 396 → 2,307 msgs/s per worker (docs/PERFORMANCE.md) |
@@ -140,15 +140,15 @@ Phases follow `ARCHITECTURE.md §62 Development Phases`, plus a Phase 0 for setu
 
 | ID | Task | Design ref | Status | Date | Notes |
 |---|---|---|---|---|---|
-| P4-01 | PostgreSQL HA + replication | DS-14 | ⬜ | | |
+| P4-01 | PostgreSQL HA + replication | DS-14, DS-23 | ✅ | 2026-09-29 | `DATABASE_READ_URL` routes reports to a replica (tested); `infrastructure/ha/docker-compose.ha.yml` (primary + `pg_basebackup` streaming replica + Redis/3 Sentinels) rehearsed in Docker: replica streams and is read-only, Sentinel promoted the Redis replica in ~8 s. Production failover: managed PostgreSQL / Patroni |
 | P4-02 | Redis HA / evaluate RabbitMQ or Kafka for durability | DS-05, DS-23, ADR-002, ADR-014 | ✅ | 2026-09-29 | `REDIS_SENTINELS` in backend and workers; failover test kills the master and the client continues on the promoted replica. Broker not adopted (ADR-014) |
 | P4-03 | Worker autoscaling from queue depth | DS-08, DS-23 | ✅ | 2026-09-29 | Worker *pools* (one credential, per-instance records, cascade disable, stale-instance pruning; migration 0009); `omnisend_workers_desired` from open jobs and `autoscale_*` settings; KEDA ScaledObject (`infrastructure/k8s/`) and `compose_autoscaler.py` (scale up now, down after cooldown) |
 | P4-04 | Observability stack: Prometheus, Grafana, Loki, OpenTelemetry | DS-15, DS-23 | ✅ | 2026-09-29 | `monitoring` compose profile: Prometheus, Alertmanager, Grafana (provisioned datasources + "OmniSendPro overview" dashboard), Loki + Promtail; optional OTel tracing (FastAPI, SQLAlchemy, httpx) via the `otel` extra. Configs validated with promtool/amtool/loki |
 | P4-05 | Alerting rules (worker offline, provider degraded, queue backlog, DLQ growth) | DS-15, DS-23 | ✅ | 2026-09-29 | 10 rules (+ inbox backlog/dead letters, API down, stalled sending, workers below desired) with promtool unit tests; Alertmanager routes critical → Slack + email, warning → email, secrets from files |
 | P4-06 | Backups: daily full + PITR; tested restore runbook | DS-14, DS-23 | ✅ | 2026-09-29 | `infrastructure/backup/`: checksummed `pg_dump` backups (optional S3 copy, pruning), `restore.sh` (checksum-verified, never over the live DB), `restore_drill.sh` (row counts per table + revision) run in the test suite; WAL-archiving config for PITR |
 | P4-07 | Queue recovery drill (Redis failure, no silent job loss) | DS-05, DS-23 | ✅ | 2026-09-29 | `tests/e2e/test_redis_failure.py`: Redis SIGKILLed mid-campaign, restarted empty; 360/360 delivered exactly once |
-| P4-08 | Production deployment (Nginx, Cloudflare, TLS, secret manager) | DS-14 | 🔄 | | Images, nginx and a production-mode compose run are verified. **Remaining:** real environment |
-| P4-09 | Verify all §68 Architecture Success Criteria | — | 🔄 | | 14 / 17 verified (see below) |
+| P4-08 | Production deployment (Nginx, Cloudflare, TLS, secret manager) | DS-14, DS-23 | 🔄 | 2026-09-29 | Images, nginx (CSP template), production-mode compose, `<NAME>_FILE` secrets, hardened Kubernetes manifests with KEDA, deployment guide. **Remaining:** provision a real environment (DNS, certificates, secret manager) — an operator task |
+| P4-09 | Verify all §68 Architecture Success Criteria | — | ✅ | 2026-09-29 | 17 / 17 verified (see below) |
 | P4-10 | Restricted Redis ACL user for workers (rate-limit keys only) | ADR-004, DS-23 | ✅ | 2026-09-29 | `infrastructure/redis/render-acl.sh`: `worker` user limited to `rl:provider:*` and the bucket's commands; default user off; tested against a real redis-server |
 
 ---
@@ -170,10 +170,10 @@ Tick when verified by a test, drill, or measurement (link the evidence).
 - [x] Reports are eventually consistent and auditable: counters plus the event log; audit log tests
 - [x] Secrets are encrypted: AES-256-GCM, never returned (`test_provider_secret_is_never_returned`)
 - [x] Worker credentials are isolated: separate key and audience (`test_invalid_and_worker_tokens_rejected_on_user_api`)
-- [ ] Database backups are tested (P4-06)
-- [ ] Queue recovery is tested: lease recovery is tested; Redis-failure drill pending (P4-07)
+- [x] Database backups are tested: backup → restore → row-count comparison of every table (`backend/tests/test_backup_drill.py`, `infrastructure/backup/restore_drill.sh`)
+- [x] Queue recovery is tested: lease recovery (`test_reliability.py`) and the Redis-failure drill — Redis killed and restarted empty mid-campaign, every recipient sent exactly once (`tests/e2e/test_redis_failure.py`)
 - [x] Load testing validates the required throughput (target 1.5M/hour ≈ 416.67/sec): measured 2,307 msgs/s with one worker, 4,803 msgs/s with three (`docs/PERFORMANCE.md`); large-scale multi-machine run still pending (P3-10)
-- [ ] Monitoring and alerting are operational (P4-04, P4-05)
+- [x] Monitoring and alerting are operational: Prometheus scraped the live API with all 10 rules loaded, Alertmanager routed a critical alert to the on-call receiver, Grafana provisioned the dashboard and rendered live data; rules unit-tested with promtool (P4-04, P4-05)
 
 ---
 
@@ -181,12 +181,13 @@ Tick when verified by a test, drill, or measurement (link the evidence).
 
 | Suite | Result |
 |---|---|
-| Backend (`backend/tests`, real Postgres + Redis) | ✅ 75 passed |
-| Worker (`worker/tests`) | ✅ 29 passed |
-| Load test (`tests/load`) | ✅ 60k recipients: 2,307 / 3,734 / 4,803 msgs/s with 1 / 2 / 3 workers |
-| End-to-end (`tests/e2e`: uvicorn + scheduler + worker process + SMTP sink) | ✅ 1 passed (120 deliveries) |
-| Web (`packages/web-shared` vitest) | ✅ 11 passed; both apps typecheck and build |
-| Browser verification (Chromium, dev and production-mode Docker stack) | ✅ admin and user flows; 300 real deliveries through the containers; bounce mailbox and API-key screens (desktop + 390 px) |
+| Backend (`backend/tests`, real Postgres + Redis) | ✅ 105 passed |
+| Worker (`worker/tests`) | ✅ 52 passed |
+| Load test (`tests/load`) | ✅ 60k recipients: 2,307 / 3,734 / 4,803 msgs/s with 1 / 2 / 3 workers; 500k with 3 workers: 4,743 msgs/s; pipelining at 25 ms RTT: 153 → 590 msgs/s |
+| End-to-end (`tests/e2e`: API + runner + worker process + SMTP sink) | ✅ 2 passed (120 deliveries with template tags + async DSN; Redis-failure drill, 360/360 exactly once) |
+| Web (`packages/web-shared` vitest) | ✅ 16 passed; both apps typecheck and build |
+| Browser verification (Chromium, dev and production-mode Docker stack) | ✅ admin and user flows; 300 real deliveries through the containers; bounce mailbox, API keys, 200k-row upload via object storage, template-tag tables (desktop + 390 px), Grafana dashboard on live data |
+| Infrastructure | ✅ promtool/amtool/loki config checks + alert rule tests; HA stack (streaming replica, Sentinel failover) rehearsed in Docker; nginx CSP template `nginx -t`; Kubernetes manifests parsed |
 
 ---
 
@@ -199,7 +200,9 @@ Tick when verified by a test, drill, or measurement (link the evidence).
 | R-03 | Spec gap | Tenancy model unspecified | Affects every table and query | User = tenant (OQ-01); add `organizations` later if needed | Resolved (default) |
 | R-04 | Throughput | 416.67/sec target depends on provider limits outside our control | Target may not be met | Platform measured at 4.8k msgs/s; real-world rate = provider limits × `max_connections` (docs/PERFORMANCE.md) | Mitigated |
 | R-05 | Repo hygiene | A local Redis snapshot (`dump.rdb`, test data only) was committed in `e0d9add` and removed in `79d4439` | Low: no secrets, but it stays in history | Now in `.gitignore`; rewrite history only if the owner wants it | Accepted |
-| R-06 | Operations | Scheduler runs inside API replicas (leader lock) | A slow tick shares CPU with API requests | Split into its own process (P3-02) | Open |
+| R-06 | Operations | Scheduler runs inside API replicas (leader lock) | A slow tick shares CPU with API requests | Split into its own process (P3-02): `python -m app.runner` | Resolved |
+| R-08 | Operations | Webhooks now return 202 before processing | Integrations that read the old response body get `{"queued", "rejected"}` | Providers only need a 2xx; results are on the inbox row / admin queues | Accepted |
+| R-09 | Scale | Only single-machine load tests so far | Multi-machine behaviour (network, DB contention) not measured | Run `tests/load/run_load.py` against a staging cluster (P3-10) | Open |
 | R-07 | Compliance | Plain-SMTP providers without webhooks only report bounces seen during SMTP; asynchronous bounces and complaints are missed | Bounce/complaint suppression incomplete for those providers | DSN/FBL ingestion (P2-10): bounce mailbox (IMAP) or signed raw-message endpoint per provider | Resolved |
 
 ---
@@ -227,6 +230,7 @@ Short record of decisions that changed scope or design. Full rationale lives in 
 
 Newest first. One line per completed task or significant change.
 
+- **2026-09-29**: Phase 4: Redis ACL for workers, Sentinel (failover-tested), read replica routing, `*_FILE` secrets, backups with a restore drill, Redis-failure drill, worker pools + autoscaling (KEDA / compose), monitoring stack with alert routing and dashboard, optional tracing, Kubernetes manifests, HA reference stack. 500k load test (4,743 msgs/s) found and fixed a retry-batch numbering race. (P4-01…P4-07, P4-09, P4-10; P3-10 partial)
 - **2026-09-29**: Email template tags (DS-24, user request) and the "Available tags" reference table with copy-to-clipboard; SMTP pipelining/chunking (P3-15: 153 → 590 msgs/s at 25 ms RTT); large uploads via object storage + import worker (P3-04/05); SSE live dashboards (P3-03); runner process + event inbox (P3-02/06); partitioning + retention (P3-11/12).
 - **2026-09-29**: API keys (DS-17): `api_keys` table (migration 0004), `osk_` bearer auth on the User API with scopes ∩ role, per-key rate limit, session-only account endpoints, admin *API keys* page and user *Profile → API keys*; shared key table/dialogs in `web-shared`. Failed connection tests / polls now show error toasts. `npm test` no longer fails on the apps without test files. Phase 2 complete. (P2-15)
 
@@ -244,9 +248,10 @@ Newest first. One line per completed task or significant change.
 
 ## Next up (recommended order)
 
-1. **P3-15**: SMTP PIPELINING, then the large multi-machine load test (P3-10).
-2. **P3-12 / P3-11**: retention jobs, then partitioning for high-volume tables.
-3. **P3-03**: SSE live updates (replace polling on the monitor and dashboards).
-4. **P3-04 / P3-05**: object-storage uploads and an out-of-API validation worker for very large lists.
-5. **P4-10**: Redis ACL for workers; **P3-02**: dedicated scheduler process.
-6. Phase 4: backups with a restore drill (P4-06), Redis failure drill (P4-07), monitoring deployment (P4-04/05).
+1. **P4-08**: provision the real environment (DNS, TLS certificates, secret manager, managed PostgreSQL with
+   a replica, Redis with Sentinel) from `infrastructure/k8s/` or the compose files; run `restore_drill.sh`
+   there weekly and wire its failure into alerting.
+2. **P3-10**: 1M-recipient run across separate machines against staging (R-09).
+3. Faster recipient validation for very large direct uploads (currently ~4k rows/s; object-storage imports
+   run in the background but use the same parser).
+4. OQ-15 / R-01: confirm with the spec author whether §19 and §59 are missing content.

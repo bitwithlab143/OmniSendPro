@@ -27,6 +27,28 @@ SMTP reply (1 worker, 4 jobs):
 
 Time from *Start* to the first message: **~1 s** (was up to one scheduler interval + one worker poll).
 
+### SMTP pipelining (P3-15, design DS-22)
+
+The worker's own SMTP client sends MAIL/RCPT/BDAT and the body in one write when the provider advertises
+PIPELINING + CHUNKING (1 round trip per message instead of 4). Same machine, sink advertising both, **25 ms**
+simulated round trip, 1 worker × 4 jobs × 4 connections, 20k recipients:
+
+| Worker SMTP mode | Throughput |
+|---|---|
+| Lock-step (`WORKER_SMTP_PIPELINING=false`) | 153 msgs/s |
+| Pipelining + chunking (default) | **590 msgs/s (3.9×)** |
+
+Reproduce: `run_load.py --recipients 20000 --workers 1 --sink-processes 2 --latency-ms 25 --pipelining off|on`.
+
+### 500k recipients (P3-10)
+
+`run_load.py --recipients 500000 --workers 3 --sink-processes 3` on the same single machine:
+**500,000 sent, 0 failed, 4,743 msgs/s (~17.1M/hour)**; campaign built (500 jobs) in ~29 s; upload and
+validation of the 500k-row file 118 s (4.2k rows/s — use the object-storage import for files this size).
+This run also surfaced a race in retry-batch numbering when several workers acknowledge jobs of one
+campaign at once (fixed; regression test `test_concurrent_acks_allocate_unique_retry_batches`).
+A multi-machine run is still to do.
+
 ## What was optimised (and why)
 
 1. **Compiled messages (worker).** Profiling showed ~50% of worker CPU in Python's `email` package

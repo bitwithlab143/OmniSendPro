@@ -27,13 +27,18 @@ Admin / User web ──► Control API (FastAPI) ──► PostgreSQL (source of
   Argon2id + JWT with rotating refresh cookies, mandatory TOTP for admins, RBAC, audit log,
   AES-256-GCM secret encryption, Postgres-backed job queue with lease-based atomic claims,
   retry/dead-letter, quotas, provider health scoring, suppression, unsubscribe, delivery webhooks,
-  reports, Prometheus metrics and an in-process scheduler (Redis leader lock).
-- **worker/** – asyncio delivery worker: pooled SMTP, shared Redis token bucket per provider,
-  lease renewal, incremental idempotent result reporting, graceful shutdown.
+  reports, Prometheus metrics, API keys, template tags (#USERID#, #INVOICE#, …), SSE live dashboards,
+  time-partitioned event/log tables with retention, and a separate runner process (`python -m app.runner`:
+  leader-elected scheduler + event/import processor).
+- **worker/** – asyncio delivery worker: pooled, pipelined SMTP (PIPELINING/CHUNKING), shared Redis token
+  bucket per provider, lease renewal, incremental idempotent result reporting, graceful shutdown, pools for
+  autoscaling.
 - **admin-web/**, **user-web/** – React 19 + TypeScript + Vite + Tailwind 4 apps sharing
   **packages/web-shared/** (API client, auth, shadcn-style components, charts; light/dark).
-- **infrastructure/** – Dockerfiles, nginx (strict CSP, rate limits, separate worker-API listener).
-- **tests/e2e/** – black-box test: API + scheduler + worker process + SMTP sink.
+- **infrastructure/** – Dockerfiles, nginx (strict CSP, rate limits, separate worker-API listener),
+  Kubernetes manifests with KEDA autoscaling, monitoring stack (Prometheus, Alertmanager, Grafana, Loki),
+  backups with a restore drill, Redis ACL, HA reference stack (streaming replica, Sentinel).
+- **tests/e2e/** – black-box tests: API + runner + worker process + SMTP sink, and a Redis-failure drill.
 
 ## Quick start (Docker)
 
@@ -87,9 +92,9 @@ Alternatively create an admin from the CLI: `cd backend && ../.venv/bin/python -
 ## Tests
 
 ```bash
-(cd backend && ../.venv/bin/pytest -q)   # 75 integration + unit tests (real Postgres & Redis)
-(cd worker  && ../.venv/bin/pytest -q)   # 29 unit tests
-.venv/bin/pytest tests/e2e -q             # full pipeline with a real SMTP sink
+(cd backend && ../.venv/bin/pytest -q)   # 105 integration + unit tests (real Postgres & Redis)
+(cd worker  && ../.venv/bin/pytest -q)   # 52 tests (incl. pipelined SMTP client, Redis ACL)
+.venv/bin/pytest tests/e2e -q             # full pipeline + Redis-failure drill with a real SMTP sink
 npm run typecheck && npm test && npm run build
 ```
 
@@ -98,7 +103,8 @@ See [`docs/TESTING.md`](./docs/TESTING.md) for environment variables and what ea
 ## Performance
 
 On a single 4-vCPU machine running everything, one worker sends ~2,300 msgs/s and three workers
-~4,800 msgs/s (~17M/hour) to a local sink. With real providers, throughput is set by provider limits
+~4,800 msgs/s (~17M/hour) to a local sink; a 500,000-recipient campaign completed at 4,743 msgs/s. With 25 ms
+network latency, SMTP pipelining makes one worker ~3.9× faster (153 → 590 msgs/s). With real providers, throughput is set by provider limits
 and the provider's *Max connections*. Tuning guide and load test: [`docs/PERFORMANCE.md`](./docs/PERFORMANCE.md).
 
 ## Compliance
