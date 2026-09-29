@@ -26,6 +26,13 @@ x-backend-env: &backend-env
   ADMIN_REQUIRE_2FA: ${ADMIN_REQUIRE_2FA:-true}
   BOOTSTRAP_ADMIN_EMAIL: ${BOOTSTRAP_ADMIN_EMAIL:-}
   BOOTSTRAP_ADMIN_PASSWORD: ${BOOTSTRAP_ADMIN_PASSWORD:-}
+  # Optional object storage for large recipient files (design DS-21); see the `storage` profile below.
+  OBJECT_STORAGE_ENDPOINT: ${OBJECT_STORAGE_ENDPOINT:-}
+  OBJECT_STORAGE_PUBLIC_ENDPOINT: ${OBJECT_STORAGE_PUBLIC_ENDPOINT:-}
+  OBJECT_STORAGE_BUCKET: ${OBJECT_STORAGE_BUCKET:-}
+  OBJECT_STORAGE_REGION: ${OBJECT_STORAGE_REGION:-us-east-1}
+  OBJECT_STORAGE_ACCESS_KEY: ${OBJECT_STORAGE_ACCESS_KEY:-}
+  OBJECT_STORAGE_SECRET_KEY: ${OBJECT_STORAGE_SECRET_KEY:-}
 
 services:
   postgres:
@@ -91,6 +98,8 @@ services:
     image: omnisendpro/web:local
     restart: unless-stopped
     depends_on: [backend]
+    environment:
+      STORAGE_UPLOAD_ORIGIN: ${OBJECT_STORAGE_PUBLIC_ENDPOINT:-}
     ports:
       - "${USER_PORT:-8080}:8080"
       - "${ADMIN_PORT:-8081}:8081"
@@ -116,6 +125,37 @@ services:
     ports: ["8025:8025"]
     expose: ["1025"]
 
+  # Local S3-compatible storage for large recipient uploads:
+  #   OBJECT_STORAGE_ENDPOINT=http://minio:9000 OBJECT_STORAGE_PUBLIC_ENDPOINT=http://localhost:9000
+  #   OBJECT_STORAGE_BUCKET=omnisend-imports OBJECT_STORAGE_ACCESS_KEY=… OBJECT_STORAGE_SECRET_KEY=…
+  #   docker compose --profile storage up -d
+  minio:
+    profiles: ["storage"]
+    image: minio/minio:latest
+    command: ["server", "/data", "--console-address", ":9001"]
+    environment:
+      MINIO_ROOT_USER: ${OBJECT_STORAGE_ACCESS_KEY:-omnisend}
+      MINIO_ROOT_PASSWORD: ${OBJECT_STORAGE_SECRET_KEY:-omnisend-dev-secret}
+    ports: ["9000:9000", "9001:9001"]
+    volumes: [minio-data:/data]
+
+  minio-init:
+    profiles: ["storage"]
+    image: minio/mc:latest
+    depends_on: [minio]
+    restart: "no"
+    entrypoint: ["/bin/sh", "-c"]
+    command:
+      - >
+        until mc alias set local http://minio:9000 "$${MINIO_USER}" "$${MINIO_PASSWORD}"; do sleep 1; done &&
+        mc mb -p "local/$${BUCKET}" &&
+        mc ilm rule add --expire-days 2 --prefix imports/ "local/$${BUCKET}" || true
+    environment:
+      MINIO_USER: ${OBJECT_STORAGE_ACCESS_KEY:-omnisend}
+      MINIO_PASSWORD: ${OBJECT_STORAGE_SECRET_KEY:-omnisend-dev-secret}
+      BUCKET: ${OBJECT_STORAGE_BUCKET:-omnisend-imports}
+
 volumes:
+  minio-data:
   postgres-data:
   redis-data:

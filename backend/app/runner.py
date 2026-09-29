@@ -36,9 +36,9 @@ class Processor:
         self._task: asyncio.Task[None] | None = None
 
     async def run_once(self) -> int:
-        from app.services import processor
+        from app.services import imports, processor
 
-        return await processor.process_inbox()
+        return await processor.process_inbox() + await imports.process_next()
 
     async def run(self) -> None:
         log.info("processor_started")

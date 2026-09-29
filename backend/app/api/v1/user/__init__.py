@@ -41,14 +41,18 @@ from app.schemas.domain import (
     CampaignOut,
     CampaignStats,
     CampaignUpdate,
+    ImportCreate,
     ImportResult,
     JobOut,
+    RecipientImportOut,
     RecipientOut,
     StartRequest,
+    UploadUrlOut,
+    UploadUrlRequest,
     UserProviderOut,
 )
 from app.schemas.users import ProfileUpdate
-from app.services import api_keys, audit, reports
+from app.services import api_keys, audit, imports, reports
 from app.services import auth as auth_service
 from app.services import campaigns as svc
 from app.services import settings as settings_service
@@ -199,7 +203,8 @@ async def options(db: DB, me: Read) -> dict[str, Any]:
     presets = list(cfg["allowed_batch_sizes"])
     cap = min([v for v in (limits.max_batch_size if limits else None, int(cfg["max_batch_size"])) if v])
     return {"batch_sizes": [s for s in presets if s <= cap] or [cap], "max_batch_size": cap,
-            "default_batch_size": min(int(cfg["default_batch_size"]), cap)}
+            "default_batch_size": min(int(cfg["default_batch_size"]), cap),
+            "uploads": common.upload_options().model_dump()}
 
 
 # --------------------------------------------------------------------------- campaigns
@@ -338,3 +343,25 @@ async def my_reports(db: DB, me: ReportsRead, days: int = Query(default=7, ge=1,
     totals = await reports.event_counts(db, since, until, user_id=me.id)
     return {"since": since.isoformat(), "until": until.isoformat(), "totals": totals,
             "daily": await reports.daily_series(db, since, until, user_id=me.id)}
+
+
+# --------------------------------------------------------------------------- large uploads (DS-21)
+
+
+@router.post("/campaigns/{campaign_id}/recipients/upload-url", response_model=UploadUrlOut)
+async def recipients_upload_url(campaign_id: uuid.UUID, body: UploadUrlRequest, db: DB, me: Write) -> UploadUrlOut:
+    """Presigned POST for uploading a large recipient file straight to object storage."""
+    return await common.upload_url(db, await common.load(db, campaign_id, owner=me.id), body)
+
+
+@router.post("/campaigns/{campaign_id}/recipients/imports", response_model=RecipientImportOut, status_code=202)
+async def recipients_import(campaign_id: uuid.UUID, body: ImportCreate, db: DB, me: Write,
+                            ctx: Ctx) -> RecipientImportOut:
+    campaign = await common.load(db, campaign_id, owner=me.id)
+    job = await imports.create(db, campaign, body.object_key, body.replace, me.id, ctx)
+    return RecipientImportOut.model_validate(job)
+
+
+@router.get("/campaigns/{campaign_id}/recipients/imports", response_model=list[RecipientImportOut])
+async def recipients_imports(campaign_id: uuid.UUID, db: DB, me: Read) -> list[RecipientImportOut]:
+    return await common.list_imports(db, await common.load(db, campaign_id, owner=me.id))

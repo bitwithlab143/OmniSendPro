@@ -500,3 +500,47 @@ class ApiKeyOut(ORM):
 
 class ApiKeyCreated(ApiKeyOut):
     key: str
+
+
+# --------------------------------------------------------------------------- large uploads (DS-21)
+
+
+class UploadUrlRequest(BaseModel):
+    filename: str | None = Field(default=None, max_length=255)
+    size: int = Field(ge=1)
+
+
+class UploadUrlOut(BaseModel):
+    url: str
+    fields: dict[str, str]
+    object_key: str
+    max_bytes: int
+    expires_in: int
+
+
+class ImportCreate(BaseModel):
+    object_key: str = Field(min_length=1, max_length=512)
+    replace: bool = False
+
+
+class RecipientImportOut(ORM):
+    id: uuid.UUID
+    campaign_id: uuid.UUID
+    status: str
+    replace: bool
+    bytes_read: int
+    rows: int
+    imported: int
+    invalid: int
+    duplicates: int
+    invalid_samples: list[str] | None
+    error: str | None
+    created_at: datetime
+    started_at: datetime | None
+    finished_at: datetime | None
+
+
+class UploadOptions(BaseModel):
+    object_storage: bool
+    max_upload_bytes: int
+    max_object_bytes: int | None

@@ -482,6 +482,33 @@ class EmailEventKey(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), index=True)
 
 
+class RecipientImport(Base):
+    """Background import of a recipient file from object storage (design DS-21, P3-04/P3-05)."""
+
+    __tablename__ = "recipient_imports"
+    __table_args__ = (
+        Index("ix_recipient_imports_queue", "created_at", postgresql_where=text("status = 'queued'")),
+    )
+    id: Mapped[uuid.UUID] = uuid_pk()
+    campaign_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("campaigns.id", ondelete="CASCADE"), index=True)
+    user_id: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("users.id", ondelete="SET NULL"))
+    object_key: Mapped[str] = mapped_column(String(512))
+    replace: Mapped[bool] = mapped_column(Boolean, default=False)
+    status: Mapped[str] = mapped_column(String(16), default="queued")  # queued|processing|completed|failed
+    attempts: Mapped[int] = mapped_column(Integer, default=0, server_default=text("0"))
+    bytes_read: Mapped[int] = mapped_column(BigInteger, default=0, server_default=text("0"))
+    rows: Mapped[int] = mapped_column(Integer, default=0, server_default=text("0"))
+    imported: Mapped[int] = mapped_column(Integer, default=0, server_default=text("0"))
+    invalid: Mapped[int] = mapped_column(Integer, default=0, server_default=text("0"))
+    duplicates: Mapped[int] = mapped_column(Integer, default=0, server_default=text("0"))
+    invalid_samples: Mapped[list[str] | None] = mapped_column(JSONB)
+    error: Mapped[str | None] = mapped_column(String(512))
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+    started_at: Mapped[datetime | None] = ts()
+    heartbeat_at: Mapped[datetime | None] = ts()
+    finished_at: Mapped[datetime | None] = ts()
+
+
 class EventInbox(Base):
     """Validated provider reports waiting for the event processor (design DS-19, P3-06)."""
 
@@ -560,6 +587,7 @@ class SystemSetting(Base):
 
 
 __all__ = [
+    "RecipientImport",
     "EventInbox",
     "EmailEventKey",
     "ApiKey",

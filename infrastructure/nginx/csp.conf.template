@@ -1,0 +1,6 @@
+# Rendered by the nginx image's entrypoint (envsubst) into /etc/nginx/conf.d/csp.conf.
+# STORAGE_UPLOAD_ORIGIN: e.g. https://uploads.example.com (empty when object storage is not used).
+map $sent_http_content_type $spa_csp {
+  default "";
+  ~text/html "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: https:; connect-src 'self' ${STORAGE_UPLOAD_ORIGIN}; frame-src 'self'; frame-ancestors 'none'; base-uri 'self'; form-action 'self'; object-src 'none'";
+}

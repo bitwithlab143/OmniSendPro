@@ -14,6 +14,9 @@ RUN npm run build
 FROM nginx:1.27-alpine
 COPY infrastructure/nginx/nginx.conf /etc/nginx/nginx.conf
 COPY infrastructure/nginx/omnisend-common.conf infrastructure/nginx/omnisend-proxy.conf /etc/nginx/
+COPY infrastructure/nginx/csp.conf.template /etc/nginx/templates/csp.conf.template
+# Allowed direct-upload origin for large recipient files (DS-21); empty = object storage not used.
+ENV STORAGE_UPLOAD_ORIGIN=""
 COPY --from=build /src/user-web/dist /usr/share/nginx/user
 COPY --from=build /src/admin-web/dist /usr/share/nginx/admin
 EXPOSE 8080 8081 8082

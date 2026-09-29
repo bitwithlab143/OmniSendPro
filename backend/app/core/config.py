@@ -39,6 +39,17 @@ class Settings(BaseSettings):
     max_request_bytes: int = Field(default=2 * 1024 * 1024, alias="MAX_REQUEST_BYTES")
     max_upload_bytes: int = Field(default=50 * 1024 * 1024, alias="MAX_UPLOAD_BYTES")
 
+    # Optional S3-compatible object storage for large recipient files (design DS-21, ADR-015).
+    object_storage_endpoint: str | None = Field(default=None, alias="OBJECT_STORAGE_ENDPOINT")
+    # Endpoint the *browser* uploads to, when it differs from the internal one (e.g. http://minio:9000).
+    object_storage_public_endpoint: str | None = Field(default=None, alias="OBJECT_STORAGE_PUBLIC_ENDPOINT")
+    object_storage_bucket: str | None = Field(default=None, alias="OBJECT_STORAGE_BUCKET")
+    object_storage_region: str = Field(default="us-east-1", alias="OBJECT_STORAGE_REGION")
+    object_storage_access_key: str | None = Field(default=None, alias="OBJECT_STORAGE_ACCESS_KEY")
+    object_storage_secret_key: str | None = Field(default=None, alias="OBJECT_STORAGE_SECRET_KEY")
+    object_storage_path_style: bool = Field(default=True, alias="OBJECT_STORAGE_PATH_STYLE")
+    object_storage_max_bytes: int = Field(default=1024 * 1024 * 1024, alias="OBJECT_STORAGE_MAX_BYTES")
+
     run_scheduler: bool = Field(default=True, alias="RUN_SCHEDULER")
     scheduler_interval_seconds: float = Field(default=5.0, alias="SCHEDULER_INTERVAL_SECONDS")
     health_interval_seconds: float = Field(default=60.0, alias="HEALTH_INTERVAL_SECONDS")
@@ -64,6 +75,10 @@ class Settings(BaseSettings):
             if not self.encryption_key:
                 raise ValueError("ENCRYPTION_KEY must be set in production")
         return self
+
+    @property
+    def object_storage_enabled(self) -> bool:
+        return bool(self.object_storage_bucket and self.object_storage_access_key and self.object_storage_secret_key)
 
     @property
     def is_production(self) -> bool:

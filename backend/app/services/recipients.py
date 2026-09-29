@@ -12,7 +12,7 @@ import csv
 import io
 import re
 import uuid
-from collections.abc import Iterator
+from collections.abc import Awaitable, Callable, Iterator
 from dataclasses import dataclass, field
 from typing import IO, Any
 
@@ -121,7 +121,8 @@ def _rows(fileobj: IO[bytes]) -> Iterator[tuple[str, dict[str, str]]]:
 
 
 async def import_csv(
-    db: AsyncSession, campaign: Campaign, fileobj: IO[bytes], replace: bool = False
+    db: AsyncSession, campaign: Campaign, fileobj: IO[bytes], replace: bool = False,
+    on_chunk: Callable[[ImportStats], Awaitable[None]] | None = None,
 ) -> ImportStats:
     if replace:
         await db.execute(delete(CampaignRecipient).where(CampaignRecipient.campaign_id == campaign.id))
@@ -168,6 +169,8 @@ async def import_csv(
         inserted = len((await db.execute(stmt)).all())
         stats.imported += inserted
         stats.duplicates += len(unique) - inserted
+        if on_chunk is not None:
+            await on_chunk(stats)
 
     campaign.total_recipients = await count_recipients(db, campaign.id)
     campaign.invalid_recipients += stats.invalid

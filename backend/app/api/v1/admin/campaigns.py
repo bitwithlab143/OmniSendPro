@@ -22,12 +22,17 @@ from app.schemas.domain import (
     CampaignOut,
     CampaignStats,
     CampaignUpdate,
+    ImportCreate,
     ImportResult,
     JobOut,
+    RecipientImportOut,
     RecipientOut,
     StartRequest,
+    UploadOptions,
+    UploadUrlOut,
+    UploadUrlRequest,
 )
-from app.services import audit, reports
+from app.services import audit, imports, reports
 from app.services import campaigns as svc
 
 router = APIRouter(prefix="/campaigns", tags=["admin:campaigns"])
@@ -75,6 +80,12 @@ async def create_campaign(body: AdminCampaignCreate, db: DB, actor: Write, ctx: 
     audit.record(db, ctx, "CAMPAIGN_CREATED", "campaign", campaign.id, new=svc.campaign_snapshot(campaign))
     await db.commit()
     return common.serialize(await common.load(db, campaign.id), detail=True)  # type: ignore[return-value]
+
+
+@router.get("/upload-options", response_model=UploadOptions)
+async def upload_options(_: Read) -> UploadOptions:
+    """Whether large uploads through object storage are available (design DS-21)."""
+    return common.upload_options()
 
 
 @router.get("/{campaign_id}", response_model=CampaignDetail)
@@ -169,3 +180,25 @@ async def campaign_jobs(campaign_id: uuid.UUID, db: DB, _: Read, status: JobStat
         stmt = stmt.where(Job.status == status)
     rows, nxt = await paginate(db, stmt, [Job.created_at, Job.id], limit, cursor)
     return Page(items=[JobOut.model_validate(j) for j in rows], next_cursor=nxt)
+
+
+# --------------------------------------------------------------------------- large uploads (DS-21)
+
+
+@router.post("/{campaign_id}/recipients/upload-url", response_model=UploadUrlOut)
+async def recipients_upload_url(campaign_id: uuid.UUID, body: UploadUrlRequest, db: DB, me: Write) -> UploadUrlOut:
+    """Presigned POST for uploading a large recipient file straight to object storage."""
+    return await common.upload_url(db, await common.load(db, campaign_id), body)
+
+
+@router.post("/{campaign_id}/recipients/imports", response_model=RecipientImportOut, status_code=202)
+async def recipients_import(campaign_id: uuid.UUID, body: ImportCreate, db: DB, me: Write,
+                            ctx: Ctx) -> RecipientImportOut:
+    campaign = await common.load(db, campaign_id)
+    job = await imports.create(db, campaign, body.object_key, body.replace, me.id, ctx)
+    return RecipientImportOut.model_validate(job)
+
+
+@router.get("/{campaign_id}/recipients/imports", response_model=list[RecipientImportOut])
+async def recipients_imports(campaign_id: uuid.UUID, db: DB, _: Read) -> list[RecipientImportOut]:
+    return await common.list_imports(db, await common.load(db, campaign_id))

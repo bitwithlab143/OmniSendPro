@@ -15,9 +15,19 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import get_settings
 from app.core.errors import ApiError, not_found
-from app.models import Campaign, CampaignRecipient, Job
-from app.schemas.domain import CampaignDetail, CampaignOut, CampaignStats, CampaignUpdate, ImportResult
-from app.services import audit, recipients
+from app.models import Campaign, CampaignRecipient, Job, RecipientImport
+from app.schemas.domain import (
+    CampaignDetail,
+    CampaignOut,
+    CampaignStats,
+    CampaignUpdate,
+    ImportResult,
+    RecipientImportOut,
+    UploadOptions,
+    UploadUrlOut,
+    UploadUrlRequest,
+)
+from app.services import audit, imports, recipients, storage
 from app.services import campaigns as svc
 from app.services import jobs as job_service
 from app.services.audit import RequestContext
@@ -70,6 +80,7 @@ async def apply_update(db: AsyncSession, campaign: Campaign, body: CampaignUpdat
 async def upload(db: AsyncSession, campaign: Campaign, file: UploadFile, replace: bool,
                  ctx: RequestContext) -> ImportResult:
     svc.ensure_editable(campaign)
+    await imports.ensure_no_active_import(db, campaign.id)
     limit = get_settings().max_upload_bytes
     if file.size is not None and file.size > limit:
         raise ApiError(413, "payload_too_large", f"File exceeds the {limit // (1024 * 1024)} MB upload limit")
@@ -88,6 +99,7 @@ async def upload(db: AsyncSession, campaign: Campaign, file: UploadFile, replace
 
 async def clear_recipients(db: AsyncSession, campaign: Campaign, ctx: RequestContext) -> Campaign:
     svc.ensure_editable(campaign)
+    await imports.ensure_no_active_import(db, campaign.id)
     await recipients.clear(db, campaign)
     svc.refresh_readiness(campaign)
     audit.record(db, ctx, "RECIPIENTS_CLEARED", "campaign", campaign.id)
@@ -161,3 +173,34 @@ def _csv_safe(value: str) -> str:
 
 def stats_dict(s: CampaignStats) -> dict[str, Any]:
     return s.model_dump(mode="json")
+
+
+# --------------------------------------------------------------------------- large uploads (DS-21)
+
+
+def upload_options() -> UploadOptions:
+    s = get_settings()
+    return UploadOptions(object_storage=storage.enabled(), max_upload_bytes=s.max_upload_bytes,
+                         max_object_bytes=s.object_storage_max_bytes if storage.enabled() else None)
+
+
+async def upload_url(db: AsyncSession, campaign: Campaign, body: UploadUrlRequest) -> UploadUrlOut:
+    svc.ensure_editable(campaign)
+    if not storage.enabled():
+        raise ApiError(400, "object_storage_disabled", "Large uploads are not configured on this server")
+    limit = get_settings().object_storage_max_bytes
+    if body.size > limit:
+        raise ApiError(413, "payload_too_large", f"File exceeds the {limit // (1024 * 1024)} MB limit")
+    name = (body.filename or "").lower()
+    if name and not name.endswith((".csv", ".txt")):
+        raise ApiError(415, "unsupported_file", "Upload a .csv or .txt file")
+    await imports.ensure_no_active_import(db, campaign.id)
+    return UploadUrlOut(**storage.presign_upload(imports.new_object_key(campaign), limit))
+
+
+async def list_imports(db: AsyncSession, campaign: Campaign) -> list[RecipientImportOut]:
+    rows = (
+        await db.execute(select(RecipientImport).where(RecipientImport.campaign_id == campaign.id)
+                         .order_by(RecipientImport.created_at.desc()).limit(20))
+    ).scalars().all()
+    return [RecipientImportOut.model_validate(r) for r in rows]

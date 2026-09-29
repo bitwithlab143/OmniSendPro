@@ -20,6 +20,7 @@ from app.models import (
     Job,
     Provider,
     ProviderAssignment,
+    RecipientImport,
     User,
     UserLimits,
 )
@@ -128,6 +129,11 @@ async def start(db: AsyncSession, campaign: Campaign, ctx: RequestContext, conse
         raise ApiError(409, "campaign_not_ready",
                        "Campaign is not ready to start" if missing else f"Campaign is {campaign.status.value}",
                        {"missing": missing})
+    busy = (await db.execute(select(RecipientImport.id).where(
+        RecipientImport.campaign_id == campaign.id, RecipientImport.status.in_(("queued", "processing"))).limit(1))
+    ).scalar_one_or_none()
+    if busy is not None:
+        raise ApiError(409, "import_in_progress", "Wait for the recipient import to finish before starting")
     if not consent:
         raise ApiError(422, "consent_required",
                        "Confirm that all recipients opted in to receive this email")

@@ -31,3 +31,12 @@ describe("status and meters", () => {
     expect(screen.getByText(/no limit/)).toBeTruthy();
   });
 });
+
+describe("byte sizes", () => {
+  it("formats file sizes for upload limits", async () => {
+    const { fmtBytes } = await import("../lib/format");
+    expect(fmtBytes(512)).toBe("512 B");
+    expect(fmtBytes(50 * 1024 * 1024)).toBe("50 MB");
+    expect(fmtBytes(1.5 * 1024 * 1024 * 1024)).toBe("1.5 GB");
+  });
+});

@@ -14,7 +14,7 @@ from sqlalchemy import delete, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.db import partitions
-from app.models import EmailEventKey, EventInbox, RefreshToken
+from app.models import EmailEventKey, EventInbox, RecipientImport, RefreshToken
 from app.services import settings as settings_service
 
 log = logging.getLogger("omnisend.maintenance")
@@ -75,6 +75,8 @@ async def prune(db: AsyncSession, now: datetime | None = None) -> dict[str, int]
     out["event_keys"] = res.rowcount or 0
     res = await db.execute(delete(EventInbox).where(EventInbox.processed_at < now - INBOX_RETENTION))
     out["inbox"] = res.rowcount or 0
+    res = await db.execute(delete(RecipientImport).where(RecipientImport.finished_at < now - timedelta(days=30)))
+    out["imports"] = res.rowcount or 0
     await db.commit()
     return out
 

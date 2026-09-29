@@ -13,15 +13,21 @@ import {
   PageLoader,
   Select,
   Textarea,
+  LARGE_FILE_BYTES,
+  Progress,
   cn,
   errorMessage,
   fmt,
+  fmtBytes,
+  uploadToStorage,
   useAction,
   useConfirm,
+  useToast,
+  type PresignedPost,
 } from "@omnisend/web-shared";
-import { useQuery } from "@tanstack/react-query";
+import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { ArrowLeft, ArrowRight, Check, FileUp, Play, Trash2, UploadCloud } from "lucide-react";
-import { useRef, useState, type DragEvent, type FormEvent } from "react";
+import { useEffect, useRef, useState, type DragEvent, type FormEvent } from "react";
 import { Link, Navigate, useNavigate, useParams, useSearchParams } from "react-router";
 
 import { api } from "../api";
@@ -39,6 +45,21 @@ interface Options {
   batch_sizes: number[];
   max_batch_size: number;
   default_batch_size: number;
+  uploads: { object_storage: boolean; max_upload_bytes: number; max_object_bytes: number | null };
+}
+
+interface RecipientImport {
+  id: string;
+  status: "queued" | "processing" | "completed" | "failed";
+  replace: boolean;
+  bytes_read: number;
+  rows: number;
+  imported: number;
+  invalid: number;
+  duplicates: number;
+  invalid_samples: string[] | null;
+  error: string | null;
+  created_at: string;
 }
 
 const MISSING_LABEL: Record<string, string> = {
@@ -110,7 +131,7 @@ export function CampaignEditorPage() {
       )}
       {step === "details" && <DetailsStep campaign={c} providers={providers.data ?? []} options={options.data} onDone={(saved) => navigate(`/campaigns/${saved.id}/edit?step=content`, { replace: !c })} />}
       {step === "content" && c && <ContentStep campaign={c} onDone={() => setStep("recipients")} onBack={() => setStep("details")} />}
-      {step === "recipients" && c && <RecipientsStep campaign={c} onDone={() => setStep("review")} onBack={() => setStep("content")} />}
+      {step === "recipients" && c && <RecipientsStep campaign={c} options={options.data} onDone={() => setStep("review")} onBack={() => setStep("content")} />}
       {step === "review" && c && <ReviewStep campaign={c} onBack={() => setStep("recipients")} />}
     </>
   );
@@ -228,17 +249,70 @@ function ContentStep({ campaign, onDone, onBack }: { campaign: Campaign; onDone:
   );
 }
 
-function RecipientsStep({ campaign, onDone, onBack }: { campaign: Campaign; onDone: () => void; onBack: () => void }) {
+function RecipientsStep({ campaign, options, onDone, onBack }: { campaign: Campaign; options?: Options; onDone: () => void; onBack: () => void }) {
   const confirm = useConfirm();
+  const toast = useToast();
+  const qc = useQueryClient();
   const input = useRef<HTMLInputElement>(null);
   const [drag, setDrag] = useState(false);
   const [result, setResult] = useState<ImportResult | null>(null);
   const [replace, setReplace] = useState(false);
-  const upload = useAction((file: File) => api.upload<ImportResult>(`/user/campaigns/${campaign.id}/recipients`, file, { replace }), {
+  const [sent, setSent] = useState<number | null>(null); // upload progress to storage, 0..1
+  const base = `/user/campaigns/${campaign.id}`;
+  const uploads = options?.uploads;
+  const maxBytes = uploads?.object_storage ? (uploads.max_object_bytes ?? uploads.max_upload_bytes) : (uploads?.max_upload_bytes ?? 50 * 1024 * 1024);
+
+  const importsQ = useQuery({
+    queryKey: ["campaigns", campaign.id, "imports"],
+    queryFn: () => api.get<RecipientImport[]>(`${base}/recipients/imports`),
+    enabled: !!uploads?.object_storage,
+    refetchInterval: (q) => (q.state.data?.some((i) => i.status === "queued" || i.status === "processing") ? 1500 : false),
+  });
+  const active = importsQ.data?.find((i) => i.status === "queued" || i.status === "processing");
+  const latest = importsQ.data?.[0];
+  const lastStatus = useRef<string | undefined>(undefined);
+  useEffect(() => {
+    // Announce the outcome of a background import once, when it finishes.
+    if (latest && lastStatus.current && lastStatus.current !== latest.status) {
+      if (latest.status === "completed") {
+        toast.success(`Imported ${fmt(latest.imported)} recipients`);
+        setResult({ rows: latest.rows, imported: latest.imported, invalid: latest.invalid, duplicates: latest.duplicates, invalid_samples: latest.invalid_samples ?? [] } as ImportResult);
+        void qc.invalidateQueries({ queryKey: ["campaigns"] });
+      } else if (latest.status === "failed") toast.error(`Import failed: ${latest.error ?? "unknown error"}`);
+    }
+    lastStatus.current = latest?.status;
+  }, [latest, qc, toast]);
+
+  const direct = useAction((file: File) => api.upload<ImportResult>(`${base}/recipients`, file, { replace }), {
     invalidate: [["campaigns"]],
     success: (r) => `Imported ${fmt(r.imported)} recipients`,
     onSuccess: setResult,
   });
+  const large = useAction(
+    async (file: File) => {
+      const post = await api.post<PresignedPost>(`${base}/recipients/upload-url`, { filename: file.name, size: file.size });
+      setSent(0);
+      try {
+        await uploadToStorage(post, file, setSent);
+      } finally {
+        setSent(null);
+      }
+      return api.post<RecipientImport>(`${base}/recipients/imports`, { object_key: post.object_key, replace });
+    },
+    { invalidate: [["campaigns", campaign.id, "imports"]], success: "Upload complete — importing in the background" },
+  );
+  const upload = {
+    isPending: direct.isPending || large.isPending,
+    mutate: (file: File) => {
+      if (file.size > maxBytes) {
+        toast.error(`The file is larger than ${fmtBytes(maxBytes)}`);
+        return;
+      }
+      setResult(null);
+      if (uploads?.object_storage && file.size > LARGE_FILE_BYTES) large.mutate(file);
+      else direct.mutate(file);
+    },
+  };
   const clear = useAction(() => api.del(`/user/campaigns/${campaign.id}/recipients`), { invalidate: [["campaigns"]], success: "Recipients removed", onSuccess: () => setResult(null) });
   const onDrop = (e: DragEvent) => {
     e.preventDefault();
@@ -261,7 +335,7 @@ function RecipientsStep({ campaign, onDone, onBack }: { campaign: Campaign; onDo
           >
             <UploadCloud className="mb-3 size-8 text-fg-muted" />
             <p className="text-sm font-medium">Drop a CSV file here</p>
-            <p className="mt-1 text-xs text-fg-muted">An “email” column is required; other columns become merge variables. Up to 50 MB.</p>
+            <p className="mt-1 text-xs text-fg-muted">An “email” column is required; other columns become merge variables. Up to {fmtBytes(maxBytes)}.</p>
             <input
               ref={input}
               type="file"
@@ -273,10 +347,20 @@ function RecipientsStep({ campaign, onDone, onBack }: { campaign: Campaign; onDo
                 e.target.value = "";
               }}
             />
-            <Button variant="secondary" className="mt-4" loading={upload.isPending} onClick={() => input.current?.click()}>
+            <Button variant="secondary" className="mt-4" loading={upload.isPending} disabled={!!active} onClick={() => input.current?.click()}>
               <FileUp /> Choose file
             </Button>
           </div>
+          {sent !== null && <Progress value={sent * 100} label="Uploading to storage" />}
+          {active && (
+            <div className="rounded-lg border border-border bg-surface-2 p-4 text-sm" role="status" aria-live="polite">
+              <div className="flex items-center justify-between gap-2">
+                <span className="font-medium">{active.status === "queued" ? "Waiting to import…" : "Importing recipients…"}</span>
+                <span className="tabular text-fg-secondary">{fmt(active.rows)} rows read</span>
+              </div>
+              <p className="mt-1 text-xs text-fg-muted">You can leave this page; the import continues in the background. Starting is disabled until it finishes.</p>
+            </div>
+          )}
           {campaign.total_recipients > 0 && <Checkbox checked={replace} onChange={(e) => setReplace(e.target.checked)} label="Replace the current list instead of adding to it" />}
           {result && (
             <div className="rounded-lg border border-border bg-surface-2 p-4 text-sm">
